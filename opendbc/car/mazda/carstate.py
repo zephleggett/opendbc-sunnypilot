@@ -22,8 +22,7 @@ class CarState(CarStateBase):
     self.accel_button = 0
     self.decel_button = 0
 
-    self.lkas_block_from_standstill = False
-    self.lkas_boot_timer = 0
+    self.lkas_standstill_timer = 0
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
@@ -106,20 +105,13 @@ class CarState(CarStateBase):
     if self.CP.minSteerSpeed > 0:
       ret.steerFaultTemporary = self.lkas_allowed_speed and lkas_blocked
     else:
-      # CX-5 2022: LKAS_BLOCK is always ON at standstill and persists briefly as
-      # the car starts moving (EPS boot). Only suppress this inherited pattern;
-      # any fresh LKAS_BLOCK while driving is immediately reported as a lockout.
-      # Safety timeout at 15s forces reporting if LKAS_BLOCK never clears.
+      # CX-5 2022: LKAS_BLOCK is always ON at standstill and persists for ~3s
+      # as the car starts moving (EPS boot). Suppress for 3.5s after standstill.
       if ret.standstill:
-        self.lkas_block_from_standstill = lkas_blocked
-        self.lkas_boot_timer = 0
-      else:
-        self.lkas_boot_timer += 1
-        if not lkas_blocked:
-          self.lkas_block_from_standstill = False
-
-      suppress = self.lkas_block_from_standstill and self.lkas_boot_timer < 1500
-      ret.steerFaultTemporary = lkas_blocked and not suppress
+        self.lkas_standstill_timer = 0
+      elif self.lkas_standstill_timer < 350:
+        self.lkas_standstill_timer += 1
+      ret.steerFaultTemporary = lkas_blocked and self.lkas_standstill_timer >= 350
 
     self.acc_active_last = ret.cruiseState.enabled
 
