@@ -99,11 +99,14 @@ class CarState(CarStateBase):
     ret.lowSpeedAlert = self.low_speed_alert
 
     # Check if LKAS is disabled due to lack of driver torque when all other states indicate
-    # it should be enabled (steer lockout). For cars with minSteerSpeed > 0, the EPS actually
-    # rejects steering below its speed threshold. For cars with minSteerSpeed == 0 (e.g. CX-5
-    # 2022), the EPS accepts commands at all speeds and LKAS_BLOCK is just the stock LKAS
-    # state — not a fault condition for openpilot.
-    ret.steerFaultTemporary = self.CP.minSteerSpeed > 0 and self.lkas_allowed_speed and lkas_blocked
+    # it should be enabled (steer lockout).
+    if self.CP.minSteerSpeed > 0:
+      ret.steerFaultTemporary = self.lkas_allowed_speed and lkas_blocked
+    else:
+      # CX-5 2022: EPS accepts commands at all speeds but cycles LKAS_BLOCK during
+      # low-speed acceleration (up to ~31 kph). Only report fault above the stock LKAS
+      # threshold where LKAS_BLOCK indicates a genuine steer lockout.
+      ret.steerFaultTemporary = lkas_blocked and speed_kph > LKAS_LIMITS.DISABLE_SPEED
 
     self.acc_active_last = ret.cruiseState.enabled
 
