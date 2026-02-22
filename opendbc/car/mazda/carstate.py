@@ -22,6 +22,8 @@ class CarState(CarStateBase):
     self.accel_button = 0
     self.decel_button = 0
 
+    self._standstill_exit_timer = 0
+
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
     cp_cam = can_parsers[Bus.cam]
@@ -104,9 +106,14 @@ class CarState(CarStateBase):
       ret.steerFaultTemporary = self.lkas_allowed_speed and lkas_blocked
     else:
       # CX-5 2022: EPS accepts commands at all speeds. LKAS_BLOCK briefly activates at
-      # the standstill-to-moving transition (~1 kph) as the stock LKAS state machine cycles.
-      # Filter that near-standstill false positive while preserving lockout detection.
-      ret.steerFaultTemporary = lkas_blocked and speed_kph > 2
+      # the standstill-to-moving transition as the stock LKAS state machine cycles, but is
+      # a valid lockout indicator during normal driving. Suppress for 1s after leaving
+      # standstill to filter the false positive, then report any LKAS_BLOCK as a real fault.
+      if ret.standstill:
+        self._standstill_exit_timer = 0
+      elif self._standstill_exit_timer < 100:  # ~1 second at 100 Hz
+        self._standstill_exit_timer += 1
+      ret.steerFaultTemporary = lkas_blocked and self._standstill_exit_timer >= 100
 
     self.acc_active_last = ret.cruiseState.enabled
 
