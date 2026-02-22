@@ -17,6 +17,7 @@ class CarState(CarStateBase):
     self.crz_btns_counter = 0
     self.acc_active_last = False
     self.lkas_allowed_speed = False
+    self.lkas_init_complete = False
 
     self.distance_button = 0
     self.accel_button = 0
@@ -78,12 +79,13 @@ class CarState(CarStateBase):
       elif speed_kph < LKAS_LIMITS.DISABLE_SPEED:
         self.lkas_allowed_speed = False
     else:
-      # CX-5 2022: no speed gate, but LKAS_BLOCK is always ON at standstill (EPS boot).
-      # Gate on LKAS_BLOCK clearing — same pattern as older cars use speed for.
+      self.lkas_allowed_speed = True
+      # CX-5 2022: LKAS_BLOCK is always ON at standstill (EPS boot). Track when
+      # it clears for the first time — after that, trust it as a real fault signal.
       if not lkas_blocked:
-        self.lkas_allowed_speed = True
+        self.lkas_init_complete = True
       elif ret.standstill:
-        self.lkas_allowed_speed = False
+        self.lkas_init_complete = False
 
     # TODO: the signal used for available seems to be the adaptive cruise signal, instead of the main on
     #       it should be used for carState.cruiseState.nonAdaptive instead
@@ -104,9 +106,13 @@ class CarState(CarStateBase):
     ret.lowSpeedAlert = self.low_speed_alert
 
     # Check if LKAS is disabled due to lack of driver torque when all other states indicate
-    # it should be enabled (steer lockout). lkas_allowed_speed gates this so the fault can
-    # only fire after LKAS_BLOCK has cleared at least once (filters the standstill boot).
-    ret.steerFaultTemporary = self.lkas_allowed_speed and lkas_blocked
+    # it should be enabled (steer lockout).
+    if self.CP.minSteerSpeed > 0:
+      ret.steerFaultTemporary = self.lkas_allowed_speed and lkas_blocked
+    else:
+      # lkas_init_complete gates this so the fault can only fire after LKAS_BLOCK
+      # has cleared at least once, filtering the standstill boot sequence.
+      ret.steerFaultTemporary = self.lkas_init_complete and lkas_blocked
 
     self.acc_active_last = ret.cruiseState.enabled
 
