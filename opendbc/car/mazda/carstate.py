@@ -22,6 +22,10 @@ class CarState(CarStateBase):
     self.accel_button = 0
     self.decel_button = 0
 
+    self._lkas_boot_done = False
+    self._lkas_clear_frames = 0
+    self._post_standstill_frames = 0
+
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
     cp_cam = can_parsers[Bus.cam]
@@ -103,10 +107,28 @@ class CarState(CarStateBase):
     if self.CP.minSteerSpeed > 0:
       ret.steerFaultTemporary = self.lkas_allowed_speed and lkas_blocked
     else:
-      # CX-5 2022: EPS accepts commands at all speeds and steerAtStandstill keeps the EPS
-      # primed through the standstill-to-moving transition, preventing LKAS_BLOCK cycling.
-      # Any LKAS_BLOCK activation during normal driving indicates a genuine steer lockout.
-      ret.steerFaultTemporary = lkas_blocked
+      # CX-5 2022: EPS accepts commands at all speeds but LKAS_BLOCK cycles ON/OFF
+      # during the standstill-to-moving boot sequence (typically up to ~30 kph).
+      # Suppress steerFaultTemporary until the boot completes — detected when LKAS_BLOCK
+      # stays OFF continuously for 2 seconds. After that, any LKAS_BLOCK activation is
+      # a genuine steer lockout. Safety timeout at 15s forces reporting if boot never
+      # completes (e.g. permanent EPS fault).
+      if ret.standstill:
+        self._lkas_boot_done = False
+        self._lkas_clear_frames = 0
+        self._post_standstill_frames = 0
+      else:
+        self._post_standstill_frames += 1
+        if not self._lkas_boot_done:
+          if not lkas_blocked:
+            self._lkas_clear_frames += 1
+            if self._lkas_clear_frames >= 200:  # 2s of continuous LKAS_BLOCK OFF
+              self._lkas_boot_done = True
+          else:
+            self._lkas_clear_frames = 0
+          if self._post_standstill_frames >= 1500:  # 15s safety timeout
+            self._lkas_boot_done = True
+      ret.steerFaultTemporary = lkas_blocked and self._lkas_boot_done
 
     self.acc_active_last = ret.cruiseState.enabled
 
