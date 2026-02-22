@@ -103,10 +103,10 @@ class CarState(CarStateBase):
     if self.CP.minSteerSpeed > 0:
       ret.steerFaultTemporary = self.lkas_allowed_speed and lkas_blocked
     else:
-      # CX-5 2022: EPS accepts commands at all speeds but cycles LKAS_BLOCK during
-      # low-speed acceleration (up to ~31 kph). Only report fault above the stock LKAS
-      # threshold where LKAS_BLOCK indicates a genuine steer lockout.
-      ret.steerFaultTemporary = lkas_blocked and speed_kph > LKAS_LIMITS.DISABLE_SPEED
+      # CX-5 2022: EPS accepts commands at all speeds. LKAS_BLOCK briefly activates at
+      # the standstill-to-moving transition (~1 kph) as the stock LKAS state machine cycles.
+      # Filter that near-standstill false positive while preserving lockout detection.
+      ret.steerFaultTemporary = lkas_blocked and speed_kph > 2
 
     self.acc_active_last = ret.cruiseState.enabled
 
