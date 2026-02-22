@@ -22,8 +22,6 @@ class CarState(CarStateBase):
     self.accel_button = 0
     self.decel_button = 0
 
-    self.lkas_standstill_timer = 0
-
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
     cp_cam = can_parsers[Bus.cam]
@@ -80,7 +78,12 @@ class CarState(CarStateBase):
       elif speed_kph < LKAS_LIMITS.DISABLE_SPEED:
         self.lkas_allowed_speed = False
     else:
-      self.lkas_allowed_speed = True
+      # CX-5 2022: no speed gate, but LKAS_BLOCK is always ON at standstill (EPS boot).
+      # Gate on LKAS_BLOCK clearing — same pattern as older cars use speed for.
+      if not lkas_blocked:
+        self.lkas_allowed_speed = True
+      elif ret.standstill:
+        self.lkas_allowed_speed = False
 
     # TODO: the signal used for available seems to be the adaptive cruise signal, instead of the main on
     #       it should be used for carState.cruiseState.nonAdaptive instead
@@ -101,17 +104,9 @@ class CarState(CarStateBase):
     ret.lowSpeedAlert = self.low_speed_alert
 
     # Check if LKAS is disabled due to lack of driver torque when all other states indicate
-    # it should be enabled (steer lockout).
-    if self.CP.minSteerSpeed > 0:
-      ret.steerFaultTemporary = self.lkas_allowed_speed and lkas_blocked
-    else:
-      # CX-5 2022: LKAS_BLOCK is always ON at standstill and persists for ~3s
-      # as the car starts moving (EPS boot). Suppress for 3.5s after standstill.
-      if ret.standstill:
-        self.lkas_standstill_timer = 0
-      elif self.lkas_standstill_timer < 350:
-        self.lkas_standstill_timer += 1
-      ret.steerFaultTemporary = lkas_blocked and self.lkas_standstill_timer >= 350
+    # it should be enabled (steer lockout). lkas_allowed_speed gates this so the fault can
+    # only fire after LKAS_BLOCK has cleared at least once (filters the standstill boot).
+    ret.steerFaultTemporary = self.lkas_allowed_speed and lkas_blocked
 
     self.acc_active_last = ret.cruiseState.enabled
 
