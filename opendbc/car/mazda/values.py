@@ -36,6 +36,11 @@ class MazdaCarSpecs(CarSpecs):
   tireStiffnessFactor: float = 0.7  # not optimized yet
 
 
+@dataclass(frozen=True, kw_only=True)
+class MazdaCX5_2022CarSpecs(CarSpecs):
+  tireStiffnessFactor: float = 0.85  # 19" low-profile tires
+
+
 class MazdaFlags(IntFlag):
   # Static flags
   # Gen 1 hardware: same CAN messages and same camera
@@ -71,7 +76,7 @@ class CAR(Platforms):
   )
   MAZDA_CX5_2022 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-5 2022-25")],
-    MAZDA_CX5.specs,
+    MazdaCX5_2022CarSpecs(mass=3728 * CV.LB_TO_KG, wheelbase=2.698, steerRatio=15.5),
   )
 
 
