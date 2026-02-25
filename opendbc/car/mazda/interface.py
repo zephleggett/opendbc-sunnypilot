@@ -21,6 +21,8 @@ class CarInterface(CarInterfaceBase):
 
     ret.dashcamOnly = candidate not in (CAR.MAZDA_CX5_2022, CAR.MAZDA_CX9_2021)
 
+    ret.enableBsm = 0x477 in fingerprint[0]
+
     ret.steerActuatorDelay = 0.1
     if candidate in (CAR.MAZDA_CX5_2022,):
       ret.steerActuatorDelay = 0.07
