@@ -40,9 +40,11 @@ legend = ["LAT_ACCEL_FACTOR", "MAX_LAT_ACCEL_MEASURED", "FRICTION"]
 # No steering wheel
 "COMMA_BODY" = [nan, 1000, nan]
 
-# Mazda CX-5 2022: empirical baselines (learned latAccelFactor=1.308, friction=0.170)
-# scaled for STEER_MAX=1500 (latAccelFactor × 1500/800, MAX_LAT_ACCEL × 1500/800)
-"MAZDA_CX5_2022" = [2.453, 2.04, 0.170]
+# Mazda CX-5 2022 (STEER_MAX=1500): drive-data baselines
+# latAccelFactor: from kinematic fit at full torque (~2.0 m/s² measured, + friction)
+# friction: old learned 0.170 at STEER_MAX=800 → 0.170×800/1500 = 0.091 (same physical force)
+# MAX_LAT_ACCEL: measured ~2.0 m/s² at ±1500 CAN (EPS non-linear above 800)
+"MAZDA_CX5_2022" = [2.1, 2.0, 0.091]
 
 # Totally new cars
 "RAM_1500_5TH_GEN" = [2.0, 2.0, 0.05]
