@@ -17,8 +17,6 @@ class CarInterface(CarInterfaceBase):
   def __init__(self, CP, CP_SP):
     super().__init__(CP, CP_SP)
     self._ext = CarInterfaceExt(CP, self)
-    if self._ext.speed_dep:
-      self._v_ego = 0.0
 
   @property
   def v_ego(self):
