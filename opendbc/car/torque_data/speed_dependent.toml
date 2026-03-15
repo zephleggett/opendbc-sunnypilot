@@ -1,16 +1,18 @@
-# Speed-dependent torque parameters — per-car speed-binned LAF and friction tables.
+# Speed-dependent torque parameters — per-car speed-binned config.
 #
 # Each entry maps a car fingerprint to breakpoints for np.interp():
-#   speed_bp  — speed breakpoints in m/s (bin centers)
-#   laf_bp    — latAccelFactor at each speed breakpoint
-#   friction_bp — friction coefficient at each speed breakpoint
+#   speed_bp    — speed breakpoints in m/s (bin centers)
+#   laf_bp      — initial latAccelFactor at each speed (closure starting point)
+#   friction_bp — initial friction at each speed (closure starting point)
 #
-# These are the offline-fitted reference values. Online learning in torqued.py
-# refines them per speed bin, with 0.5x-2.0x sanity bounds.
+# The online learner in torqued.py discovers the per-speed curve from these
+# starting values. laf_bp/friction_bp also define the sanity bounds (±30%).
 #
-# See docs/mazda-cx5-2022-speed-dep-torque.md for methodology.
+# Starting from CX9_2021 crowd-sourced baseline (LAF=1.76, friction=0.177).
+# Offline analysis (107K frames) showed LAF varies 1.10-2.89 across speed —
+# the learner will converge toward those values within the ±30% bounds.
 
 [MAZDA_CX5_2022]
 speed_bp    = [5.5, 11.0, 17.0, 23.0, 33.0]
-laf_bp      = [1.10, 2.47, 1.85, 2.45, 2.89]
-friction_bp = [0.310, 0.163, 0.143, 0.122, 0.088]
+laf_bp      = [1.76, 1.76, 1.76, 1.76, 1.76]
+friction_bp = [0.177, 0.177, 0.177, 0.177, 0.177]
