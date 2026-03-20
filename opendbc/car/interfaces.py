@@ -84,6 +84,7 @@ def get_speed_dependent_torque_params():
   with open(SPEED_DEPENDENT_TORQUE_PATH, 'rb') as f:
     return tomllib.load(f)
 
+
 # generic car and radar interfaces
 
 

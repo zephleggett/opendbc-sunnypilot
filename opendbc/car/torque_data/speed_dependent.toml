@@ -1,22 +1,16 @@
-# Speed-dependent torque parameters — per-car curve-based config.
+# Speed-dependent torque parameters — per-car speed-binned config.
 #
 # Each entry maps a car fingerprint to:
-#   speed_bp  — speed breakpoints in m/s (bin centers for online learner)
-#   laf_a/b/c — quadratic LAF: LAF(v) = laf_a*v^2 + laf_b*v + laf_c
-#   fric_a/b  — power law friction: friction(v) = fric_a * v^fric_b
+#   speed_bp    — speed breakpoints in m/s (bin centers)
+#   laf_bp      — latAccelFactor at each speed
+#   friction_bp — friction coefficient at each speed
 #
-# The online learner in torqued.py still runs per-bin SVD fits.
-# When all bins converge (cal% >= 80%), the closure refits the curve
-# from the per-bin values.
+# The online learner in torqued.py runs independent SVD fits per speed bin.
+# laf_bp/friction_bp provide starting values and define +/-30% sanity bounds.
 #
-# Initial curves from road trip data (107K frames, all bins 100% cal).
+# Values from device-learned data (all bins 100% cal).
 
 [MAZDA_CX5_2022]
-speed_bp = [5.5, 11.0, 17.0, 23.0, 33.0]
-# Quadratic LAF: LAF(v) = laf_a*v^2 + laf_b*v + laf_c
-laf_a = 0.00121
-laf_b = -0.0326
-laf_c = 2.001
-# Power law friction: friction(v) = fric_a * v^fric_b
-fric_a = 0.655
-fric_b = -0.533
+speed_bp    = [5.5, 11.0, 17.0, 23.0, 33.0]
+laf_bp      = [1.893, 1.754, 1.712, 1.999, 2.209]
+friction_bp = [0.268, 0.188, 0.134, 0.119, 0.108]
