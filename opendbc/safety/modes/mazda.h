@@ -105,6 +105,11 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     }
 
     if (mazda_longitudinal && (msg->addr == MAZDA_CRZ_INFO)) {
+      bool stock_standby = (msg->data[0] == 0x01U) && (msg->data[1] == 0xffU) &&
+                            (msg->data[2] == 0xe3U) && (msg->data[3] == 0xffU) &&
+                            (msg->data[4] == 0xc0U) && (msg->data[5] == 0x00U) &&
+                            ((msg->data[6] & 0xf0U) == 0x00U) &&
+                            (msg->data[7] == ((0x5dU - msg->data[6]) & 0xffU));
       // Keep Panda's Mazda-long safety window aligned with the software clip in
       // opendbc/car/mazda/longitudinal.py. If this is tighter than the sender,
       // Panda will silently drop 0x21b frames once ACCEL_CMD crosses the
@@ -119,7 +124,7 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
       // bit ordering used by set_value() in opendbc, which places the 13-bit
       // raw command across data[2] low bits, all of data[3], and data[4] high bits.
       int desired_accel = ((((int)msg->data[2] & 0x3U) << 11) | (((int)msg->data[3]) << 3) | (((int)msg->data[4]) >> 5)) - 4096;
-      if (longitudinal_accel_checks(desired_accel, MAZDA_LONG_LIMITS)) {
+      if (!stock_standby && longitudinal_accel_checks(desired_accel, MAZDA_LONG_LIMITS)) {
         tx = false;
       }
     }

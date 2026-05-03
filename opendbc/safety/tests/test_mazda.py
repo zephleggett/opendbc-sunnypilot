@@ -124,6 +124,19 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
     values = {"ACCEL_CMD": accel}
     return self.packer.make_can_msg_safety("CRZ_INFO", 0, values)
 
+  def test_stock_crz_info_standby_allowed(self):
+    for controls_allowed in (False, True):
+      self.safety.set_controls_allowed(controls_allowed)
+      for counter in range(16):
+        # Stock standby looks like a high raw accel command if decoded without
+        # first checking the inactive CRZ_INFO state.
+        checksum = (0x5d - counter) & 0xff
+        dat = bytes.fromhex(f"01ffe3ffc000{counter:02x}{checksum:02x}")
+        self.assertTrue(self._tx(common.make_msg(0, 0x21b, 8, dat)))
+
+      bad_checksum = bytes.fromhex("01ffe3ffc0000000")
+      self.assertFalse(self._tx(common.make_msg(0, 0x21b, 8, bad_checksum)))
+
   def test_accel_actuation_limits(self):
     # CRZ_INFO.ACCEL_CMD is a raw integer command in Mazda's DBC, so use
     # integer-domain boundaries to avoid float rounding artifacts in packing.

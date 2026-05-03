@@ -18,6 +18,7 @@ RADAR_BUS = 0
 CRZ_INFO_ADDR = 0x21B
 CRZ_CTRL_ADDR = 0x21C
 
+CRZ_INFO_STANDBY_TEMPLATE = bytes.fromhex("01ffe3ffc0000000")
 CRZ_INFO_TEMPLATE = bytes.fromhex("01ffe20006800000")
 
 LONG_COMMAND_STEP = 2
@@ -49,7 +50,7 @@ class MazdaLongitudinalProfile(str, Enum):
 
 
 CRZ_CTRL_TEMPLATES: dict[MazdaLongitudinalProfile, bytes] = {
-  MazdaLongitudinalProfile.STANDBY: bytes.fromhex("02010b0000000000"),
+  MazdaLongitudinalProfile.STANDBY: bytes.fromhex("0201010000000000"),
   MazdaLongitudinalProfile.ENGAGED_CRUISE: bytes.fromhex("0a018b2000001000"),
   MazdaLongitudinalProfile.ENGAGED_FOLLOW: bytes.fromhex("0a018b4000001000"),
   MazdaLongitudinalProfile.STOP_GO_HOLD: bytes.fromhex("0a018b6000001000"),
@@ -131,6 +132,10 @@ def near_stop_brake_accel(v_ego: float) -> float:
 def build_crz_info(accel: float, counter: int, long_active: bool, hold_request: bool, v_ego: float,
                    hold_latched: bool = False, acc_set_allowed: bool = True,
                    resume_unlatching: bool = False) -> bytes:
+  if not long_active:
+    raw = _patch_signal("CRZ_INFO", CRZ_INFO_STANDBY_TEMPLATE, "CTR1", counter % 16)
+    return _update_crz_info_checksum(raw)
+
   stopping_active = hold_request and not hold_latched
   raw = _patch_signal("CRZ_INFO", CRZ_INFO_TEMPLATE, "ACCEL_CMD", accel_to_accel_cmd(accel, v_ego))
   raw = _patch_signal("CRZ_INFO", raw, "ACC_ACTIVE", int(long_active))

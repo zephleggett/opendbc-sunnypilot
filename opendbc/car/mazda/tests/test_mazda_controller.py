@@ -4,6 +4,7 @@
 import numpy as np
 import pytest
 
+from opendbc.car.mazda.longitudinal import build_crz_ctrl, build_crz_info
 from opendbc.car.mazda.values import CAR, CarControllerParams
 
 
@@ -47,3 +48,31 @@ class TestCarControllerParams:
   def test_pre_2022_no_lookup(self, pre_2022_params):
     assert not hasattr(pre_2022_params, 'STEER_MAX_LOOKUP')
     assert pre_2022_params.STEER_MAX == 800
+
+
+class TestMazdaLongitudinalMessages:
+  def test_inactive_crz_info_matches_stock_radar_standby(self):
+    expected = [
+      "01ffe3ffc000005d",
+      "01ffe3ffc000015c",
+      "01ffe3ffc000025b",
+      "01ffe3ffc000035a",
+      "01ffe3ffc0000459",
+      "01ffe3ffc0000558",
+      "01ffe3ffc0000657",
+      "01ffe3ffc0000756",
+      "01ffe3ffc0000855",
+      "01ffe3ffc0000954",
+      "01ffe3ffc0000a53",
+      "01ffe3ffc0000b52",
+      "01ffe3ffc0000c51",
+      "01ffe3ffc0000d50",
+      "01ffe3ffc0000e4f",
+      "01ffe3ffc0000f4e",
+    ]
+
+    for counter, dat in enumerate(expected):
+      assert build_crz_info(0.0, counter, False, False, 0.0).hex() == dat
+
+  def test_inactive_crz_ctrl_matches_stock_radar_standby(self):
+    assert build_crz_ctrl(False, False, False, False).hex() == "0201010000000000"
