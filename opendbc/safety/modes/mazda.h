@@ -8,6 +8,13 @@
 #define MAZDA_CRZ_INFO      0x21bU
 #define MAZDA_CRZ_CTRL      0x21cU
 #define MAZDA_CRZ_BTNS      0x09dU
+#define MAZDA_RADAR_STATIC  0x499U
+#define MAZDA_RADAR_TRACK_1 0x361U
+#define MAZDA_RADAR_TRACK_2 0x362U
+#define MAZDA_RADAR_TRACK_3 0x363U
+#define MAZDA_RADAR_TRACK_4 0x364U
+#define MAZDA_RADAR_TRACK_5 0x365U
+#define MAZDA_RADAR_TRACK_6 0x366U
 #define MAZDA_RADAR_UDS     0x764U
 #define MAZDA_STEER_TORQUE  0x240U
 #define MAZDA_ENGINE_DATA   0x202U
@@ -22,6 +29,42 @@ enum {
 };
 
 static bool mazda_longitudinal = false;
+
+static bool mazda_radar_static_msg_valid(const CANPacket_t *msg) {
+  return (msg->data[0] == 0x00U) && (msg->data[1] == 0x08U) &&
+         (msg->data[2] == 0xc0U) && (msg->data[3] == 0x00U) &&
+         (msg->data[4] == 0x00U) && (msg->data[5] == 0x00U) &&
+         (msg->data[6] == 0x00U) && (msg->data[7] == 0x00U);
+}
+
+static bool mazda_empty_radar_track_msg_valid(const CANPacket_t *msg) {
+  bool valid = false;
+
+  if ((msg->addr == MAZDA_RADAR_TRACK_1) || (msg->addr == MAZDA_RADAR_TRACK_2) ||
+      (msg->addr == MAZDA_RADAR_TRACK_3) || (msg->addr == MAZDA_RADAR_TRACK_4)) {
+    valid = (msg->data[0] == 0xffU) && (msg->data[1] == 0xf7U) &&
+            (msg->data[2] == 0xfeU) && (msg->data[3] == 0xfeU) &&
+            (msg->data[4] == 0x1fU);
+
+    if (msg->addr == MAZDA_RADAR_TRACK_2) {
+      valid = valid && (msg->data[5] == 0xcfU) && (msg->data[6] == 0xfcU) &&
+              ((msg->data[7] & 0xf0U) == 0x80U);
+    } else if ((msg->addr == MAZDA_RADAR_TRACK_3) || (msg->addr == MAZDA_RADAR_TRACK_4)) {
+      valid = valid && (msg->data[5] == 0xc0U) && (msg->data[6] == 0x00U) &&
+              ((msg->data[7] & 0xf0U) == 0x00U);
+    } else {
+      valid = valid && (msg->data[5] == 0xc0U) && (msg->data[6] == 0x00U) &&
+              ((msg->data[7] & 0xf0U) == 0x80U);
+    }
+  } else if ((msg->addr == MAZDA_RADAR_TRACK_5) || (msg->addr == MAZDA_RADAR_TRACK_6)) {
+    valid = (msg->data[0] == 0xffU) && (msg->data[1] == 0xf7U) &&
+            (msg->data[2] == 0xfeU) && (msg->data[3] == 0x7fU) &&
+            (msg->data[4] == 0xfbU) && (msg->data[5] == 0xffU) &&
+            (msg->data[6] == 0x3fU) && ((msg->data[7] & 0xf0U) == 0xc0U);
+  }
+
+  return valid;
+}
 
 // track msgs coming from OP so that we know what CAM msgs to drop and what to forward
 static void mazda_rx_hook(const CANPacket_t *msg) {
@@ -136,6 +179,20 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
       }
     }
 
+    if (mazda_longitudinal && (msg->addr == MAZDA_RADAR_STATIC)) {
+      if (!mazda_radar_static_msg_valid(msg)) {
+        tx = false;
+      }
+    }
+
+    if (mazda_longitudinal && ((msg->addr == MAZDA_RADAR_TRACK_1) || (msg->addr == MAZDA_RADAR_TRACK_2) ||
+                               (msg->addr == MAZDA_RADAR_TRACK_3) || (msg->addr == MAZDA_RADAR_TRACK_4) ||
+                               (msg->addr == MAZDA_RADAR_TRACK_5) || (msg->addr == MAZDA_RADAR_TRACK_6))) {
+      if (!mazda_empty_radar_track_msg_valid(msg)) {
+        tx = false;
+      }
+    }
+
     if (mazda_longitudinal && (msg->addr == MAZDA_RADAR_UDS)) {
       bool tester_present = (msg->data[0] == 0x02U) && (msg->data[1] == 0x3EU) && (msg->data[2] == 0x80U);
       bool session_control = (msg->data[0] == 0x02U) && (msg->data[1] == 0x10U) &&
@@ -171,6 +228,13 @@ static safety_config mazda_init(uint16_t param) {
     {MAZDA_LKAS_HUD, 0, 8, .check_relay = true},
     {MAZDA_CRZ_INFO, 0, 8, .check_relay = false},
     {MAZDA_CRZ_CTRL, 0, 8, .check_relay = false},
+    {MAZDA_RADAR_STATIC, 0, 8, .check_relay = false},
+    {MAZDA_RADAR_TRACK_1, 0, 8, .check_relay = false},
+    {MAZDA_RADAR_TRACK_2, 0, 8, .check_relay = false},
+    {MAZDA_RADAR_TRACK_3, 0, 8, .check_relay = false},
+    {MAZDA_RADAR_TRACK_4, 0, 8, .check_relay = false},
+    {MAZDA_RADAR_TRACK_5, 0, 8, .check_relay = false},
+    {MAZDA_RADAR_TRACK_6, 0, 8, .check_relay = false},
     {MAZDA_RADAR_UDS, 0, 8, .check_relay = false},
   };
 

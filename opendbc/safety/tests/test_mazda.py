@@ -105,7 +105,8 @@ class TestMazdaIgnition(unittest.TestCase):
 
 class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafetyTest):
 
-  TX_MSGS = [[0x243, 0], [0x09d, 0], [0x440, 0], [0x21b, 0], [0x21c, 0], [0x764, 0]]
+  TX_MSGS = [[0x243, 0], [0x09d, 0], [0x440, 0], [0x21b, 0], [0x21c, 0], [0x499, 0],
+             [0x361, 0], [0x362, 0], [0x363, 0], [0x364, 0], [0x365, 0], [0x366, 0], [0x764, 0]]
   MAX_ACCEL = 2000.0
   MIN_ACCEL = -2000.0
   INACTIVE_ACCEL = 0.0
@@ -136,6 +137,37 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
 
       bad_checksum = bytes.fromhex("01ffe3ffc0000000")
       self.assertFalse(self._tx(common.make_msg(0, 0x21b, 8, bad_checksum)))
+
+  def test_empty_radar_tracks_allowed(self):
+    radar_messages = {
+      0x499: bytes.fromhex("0008c00000000000"),
+      0x361: bytes.fromhex("fff7fefe1fc00080"),
+      0x362: bytes.fromhex("fff7fefe1fcffc80"),
+      0x363: bytes.fromhex("fff7fefe1fc00000"),
+      0x364: bytes.fromhex("fff7fefe1fc00000"),
+      0x365: bytes.fromhex("fff7fe7ffbff3fc0"),
+      0x366: bytes.fromhex("fff7fe7ffbff3fc0"),
+    }
+
+    for controls_allowed in (False, True):
+      self.safety.set_controls_allowed(controls_allowed)
+      for addr, dat in radar_messages.items():
+        self.assertTrue(self._tx(common.make_msg(0, addr, 8, dat)))
+
+  def test_non_empty_radar_tracks_blocked(self):
+    bad_messages = {
+      0x499: bytes.fromhex("0008c00100000000"),
+      0x361: bytes.fromhex("fff7fefe1fc00180"),
+      0x362: bytes.fromhex("fff7fefe1fc00080"),
+      0x363: bytes.fromhex("fff7fefe1fc00080"),
+      0x364: bytes.fromhex("fff7fefe1fc00080"),
+      0x365: bytes.fromhex("fff7fe7ffbff3f80"),
+      0x366: bytes.fromhex("fff7fe7ffbff3f80"),
+    }
+
+    self.safety.set_controls_allowed(True)
+    for addr, dat in bad_messages.items():
+      self.assertFalse(self._tx(common.make_msg(0, addr, 8, dat)))
 
   def test_accel_actuation_limits(self):
     # CRZ_INFO.ACCEL_CMD is a raw integer command in Mazda's DBC, so use

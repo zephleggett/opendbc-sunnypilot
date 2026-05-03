@@ -4,7 +4,7 @@
 import numpy as np
 import pytest
 
-from opendbc.car.mazda.longitudinal import build_crz_ctrl, build_crz_info
+from opendbc.car.mazda.longitudinal import build_crz_ctrl, build_crz_info, create_radar_heartbeat_messages
 from opendbc.car.mazda.values import CAR, CarControllerParams
 
 
@@ -76,3 +76,21 @@ class TestMazdaLongitudinalMessages:
 
   def test_inactive_crz_ctrl_matches_stock_radar_standby(self):
     assert build_crz_ctrl(False, False, False, False).hex() == "0201010000000000"
+
+  def test_radar_heartbeat_matches_empty_stock_radar_tracks(self):
+    expected = [
+      (0x499, "0008c00000000000"),
+      (0x361, "fff7fefe1fc00080"),
+      (0x362, "fff7fefe1fcffc80"),
+      (0x363, "fff7fefe1fc00000"),
+      (0x364, "fff7fefe1fc00000"),
+      (0x365, "fff7fe7ffbff3fc0"),
+      (0x366, "fff7fe7ffbff3fc0"),
+    ]
+
+    can_sends = create_radar_heartbeat_messages(0, 0)
+    assert [(msg.address, msg.dat.hex()) for msg in can_sends] == expected
+
+  def test_radar_heartbeat_updates_track_counters(self):
+    can_sends = create_radar_heartbeat_messages(0, 15)
+    assert [msg.dat[-1] for msg in can_sends[1:]] == [0x8f, 0x8f, 0x0f, 0x0f, 0xcf, 0xcf]

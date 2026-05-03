@@ -4,8 +4,8 @@ from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
-from opendbc.car.mazda.longitudinal import LONG_COMMAND_STEP, NEAR_STOP_ENTRY_SPEED, RADAR_BUS, TESTER_PRESENT_STEP, \
-                                           create_longitudinal_messages, create_radar_tester_present, \
+from opendbc.car.mazda.longitudinal import LONG_COMMAND_STEP, NEAR_STOP_ENTRY_SPEED, RADAR_BUS, RADAR_HEARTBEAT_STEP, TESTER_PRESENT_STEP, \
+                                           create_longitudinal_messages, create_radar_heartbeat_messages, create_radar_tester_present, \
                                            hold_brake_accel, hold_latched_accel, near_stop_brake_accel
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.values import CarControllerParams, Buttons
@@ -32,6 +32,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.brake_counter = 0
     self.long_counter = 0
+    self.radar_counter = 0
     self.standstill_hold_frames = 0
     self.stop_intent_latched = False
     self.resume_release_frames = 0
@@ -197,6 +198,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
       if self.frame % TESTER_PRESENT_STEP == 0:
         can_sends.append(create_radar_tester_present(RADAR_BUS))
+
+      if self.frame % RADAR_HEARTBEAT_STEP == 0:
+        can_sends.extend(create_radar_heartbeat_messages(RADAR_BUS, self.radar_counter))
+        self.radar_counter = (self.radar_counter + 1) % 16
 
       if self.frame % LONG_COMMAND_STEP == 0:
         long_active = CC.longActive
