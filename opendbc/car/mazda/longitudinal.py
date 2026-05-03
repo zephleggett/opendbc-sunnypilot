@@ -25,7 +25,7 @@ CRZ_INFO_TEMPLATE = bytes.fromhex("01ffe20006800000")
 RADAR_STATIC_TEMPLATE = bytes.fromhex("0008c00000000000")
 RADAR_TRACK_EMPTY_TEMPLATES = (
   bytes.fromhex("fff7fefe1fc00080"),
-  bytes.fromhex("fff7fefe1fcffc80"),
+  bytes.fromhex("fff7fefe1fc78c80"),
   bytes.fromhex("fff7fefe1fc00000"),
   bytes.fromhex("fff7fefe1fc00000"),
   bytes.fromhex("fff7fe7ffbff3fc0"),

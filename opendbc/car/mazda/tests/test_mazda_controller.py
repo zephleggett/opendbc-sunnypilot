@@ -81,7 +81,7 @@ class TestMazdaLongitudinalMessages:
     expected = [
       (0x499, "0008c00000000000"),
       (0x361, "fff7fefe1fc00080"),
-      (0x362, "fff7fefe1fcffc80"),
+      (0x362, "fff7fefe1fc78c80"),
       (0x363, "fff7fefe1fc00000"),
       (0x364, "fff7fefe1fc00000"),
       (0x365, "fff7fe7ffbff3fc0"),

@@ -142,7 +142,7 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
     radar_messages = {
       0x499: bytes.fromhex("0008c00000000000"),
       0x361: bytes.fromhex("fff7fefe1fc00080"),
-      0x362: bytes.fromhex("fff7fefe1fcffc80"),
+      0x362: bytes.fromhex("fff7fefe1fc78c80"),
       0x363: bytes.fromhex("fff7fefe1fc00000"),
       0x364: bytes.fromhex("fff7fefe1fc00000"),
       0x365: bytes.fromhex("fff7fe7ffbff3fc0"),

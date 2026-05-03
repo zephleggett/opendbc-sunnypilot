@@ -47,7 +47,7 @@ static bool mazda_empty_radar_track_msg_valid(const CANPacket_t *msg) {
             (msg->data[4] == 0x1fU);
 
     if (msg->addr == MAZDA_RADAR_TRACK_2) {
-      valid = valid && (msg->data[5] == 0xcfU) && (msg->data[6] == 0xfcU) &&
+      valid = valid && (msg->data[5] == 0xc7U) && (msg->data[6] == 0x8cU) &&
               ((msg->data[7] & 0xf0U) == 0x80U);
     } else if ((msg->addr == MAZDA_RADAR_TRACK_3) || (msg->addr == MAZDA_RADAR_TRACK_4)) {
       valid = valid && (msg->data[5] == 0xc0U) && (msg->data[6] == 0x00U) &&
