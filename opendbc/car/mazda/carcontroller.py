@@ -4,7 +4,7 @@ from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
-from opendbc.car.mazda.longitudinal import LONG_COMMAND_STEP, NEAR_STOP_ENTRY_SPEED, RADAR_BUS, RADAR_HEARTBEAT_STEP, TESTER_PRESENT_STEP, \
+from opendbc.car.mazda.longitudinal import CAM_BUS, LONG_COMMAND_STEP, NEAR_STOP_ENTRY_SPEED, RADAR_BUS, RADAR_HEARTBEAT_STEP, TESTER_PRESENT_STEP, \
                                            create_longitudinal_messages, create_radar_heartbeat_messages, create_radar_tester_present, \
                                            hold_brake_accel, hold_latched_accel, near_stop_brake_accel
 from opendbc.car.mazda import mazdacan
@@ -200,23 +200,25 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         can_sends.append(create_radar_tester_present(RADAR_BUS))
 
       if self.frame % RADAR_HEARTBEAT_STEP == 0:
-        can_sends.extend(create_radar_heartbeat_messages(RADAR_BUS, self.radar_counter))
+        for bus in (RADAR_BUS, CAM_BUS):
+          can_sends.extend(create_radar_heartbeat_messages(bus, self.radar_counter))
         self.radar_counter = (self.radar_counter + 1) % 16
 
       if self.frame % LONG_COMMAND_STEP == 0:
         long_active = CC.longActive
         lead_visible = CC.hudControl.leadVisible
-        can_sends.extend(create_longitudinal_messages(RADAR_BUS, accel, self.long_counter,
-                                                      long_active, lead_visible,
-                                                      hold_request=crz_info_hold_request,
-                                                      crz_ctrl_hold_request=stop_go_request,
-                                                      hold_latched=hold_latched,
-                                                      crz_hold_latched=crz_hold_latched,
-                                                      crz_hold_passive=crz_hold_passive,
-                                                      crz_resume_active=crz_ctrl_resume_active,
-                                                      crz_info_resume_unlatching=crz_info_resume_unlatching,
-                                                      crz_available=CS.out.cruiseState.available,
-                                                      v_ego=CS.out.vEgo))
+        for bus in (RADAR_BUS, CAM_BUS):
+          can_sends.extend(create_longitudinal_messages(bus, accel, self.long_counter,
+                                                        long_active, lead_visible,
+                                                        hold_request=crz_info_hold_request,
+                                                        crz_ctrl_hold_request=stop_go_request,
+                                                        hold_latched=hold_latched,
+                                                        crz_hold_latched=crz_hold_latched,
+                                                        crz_hold_passive=crz_hold_passive,
+                                                        crz_resume_active=crz_ctrl_resume_active,
+                                                        crz_info_resume_unlatching=crz_info_resume_unlatching,
+                                                        crz_available=CS.out.cruiseState.available,
+                                                        v_ego=CS.out.vEgo))
         self.long_counter = (self.long_counter + 1) % 16
       self.resume_button_prev = effective_resume_requested
     else:

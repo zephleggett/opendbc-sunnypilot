@@ -4,7 +4,7 @@
 import numpy as np
 import pytest
 
-from opendbc.car.mazda.longitudinal import build_crz_ctrl, build_crz_info, create_longitudinal_messages, create_radar_heartbeat_messages
+from opendbc.car.mazda.longitudinal import CAM_BUS, RADAR_BUS, build_crz_ctrl, build_crz_info, create_longitudinal_messages, create_radar_heartbeat_messages
 from opendbc.car.mazda.values import CAR, CarControllerParams
 
 
@@ -111,6 +111,15 @@ class TestMazdaLongitudinalMessages:
     can_sends = create_longitudinal_messages(0, 0.0, 0, False, False, crz_available=crz_available)
 
     assert [(msg.address, msg.dat.hex()) for msg in can_sends] == expected
+
+  def test_replacement_messages_can_target_radar_or_camera_bus(self):
+    for bus in (RADAR_BUS, CAM_BUS):
+      can_sends = [
+        *create_longitudinal_messages(bus, 0.0, 0, False, False),
+        *create_radar_heartbeat_messages(bus, 0),
+      ]
+
+      assert {msg.src for msg in can_sends} == {bus}
 
   def test_radar_heartbeat_matches_empty_stock_radar_tracks(self):
     expected = [
