@@ -215,6 +215,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
                                                       crz_hold_passive=crz_hold_passive,
                                                       crz_resume_active=crz_ctrl_resume_active,
                                                       crz_info_resume_unlatching=crz_info_resume_unlatching,
+                                                      crz_available=CS.out.cruiseState.available,
                                                       v_ego=CS.out.vEgo))
         self.long_counter = (self.long_counter + 1) % 16
       self.resume_button_prev = effective_resume_requested

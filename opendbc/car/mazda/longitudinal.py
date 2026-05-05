@@ -142,9 +142,9 @@ def near_stop_brake_accel(v_ego: float) -> float:
 
 
 def build_crz_info(accel: float, counter: int, long_active: bool, hold_request: bool, v_ego: float,
-                   hold_latched: bool = False, acc_set_allowed: bool = True,
+                   hold_latched: bool = False, acc_set_allowed: bool = False,
                    resume_unlatching: bool = False) -> bytes:
-  if not long_active:
+  if not long_active and not acc_set_allowed:
     raw = _patch_signal("CRZ_INFO", CRZ_INFO_STANDBY_TEMPLATE, "CTR1", counter % 16)
     return _update_crz_info_checksum(raw)
 
@@ -176,12 +176,13 @@ def select_profile(long_active: bool, lead_visible: bool, hold_request: bool,
 
 def build_crz_ctrl(long_active: bool, lead_visible: bool, hold_request: bool, hold_latched: bool,
                    crz_hold_latched: bool = False, crz_hold_passive: bool = False,
-                   crz_resume_active: bool = False) -> bytes:
+                   crz_resume_active: bool = False, crz_available: bool = False) -> bytes:
   # Stock stop-and-go progresses through multiple CRZ_CTRL stop phases. Mirror
   # that sequence so the synthetic path keeps the same latch states as stock.
   lead_visible = lead_visible or hold_request or hold_latched or crz_hold_latched or crz_hold_passive
   raw = CRZ_CTRL_TEMPLATES[select_profile(long_active, lead_visible, hold_request, crz_hold_latched)]
   raw = _patch_signal("CRZ_CTRL", raw, "CRZ_ACTIVE", int(long_active))
+  raw = _patch_signal("CRZ_CTRL", raw, "CRZ_AVAILABLE", int(long_active or crz_available))
   raw = _patch_signal("CRZ_CTRL", raw, "ACC_ACTIVE_2", int(long_active and not crz_hold_passive))
   raw = _patch_signal("CRZ_CTRL", raw, "DISABLE_TIMER_1", 0)
   raw = _patch_signal("CRZ_CTRL", raw, "DISABLE_TIMER_2", 0)
@@ -196,6 +197,10 @@ def build_crz_ctrl(long_active: bool, lead_visible: bool, hold_request: bool, ho
   elif hold_request or crz_resume_active:
     raw = _patch_signal("CRZ_CTRL", raw, "RADAR_LEAD_RELATIVE_DISTANCE", 3)
     raw = _patch_signal("CRZ_CTRL", raw, "ACC_GAS_MAYBE2", 1)
+  elif not long_active and crz_available:
+    # In the synthetic pre-engage state, keep CRZ_CTRL's availability and
+    # distance setting paired with CRZ_INFO.ACC_SET_ALLOWED.
+    raw = _patch_signal("CRZ_CTRL", raw, "DISTANCE_SETTING", 2)
   return raw
 
 
@@ -206,6 +211,7 @@ def create_longitudinal_messages(bus: int, accel: float, counter: int, long_acti
                                  crz_hold_passive: bool = False,
                                  crz_resume_active: bool = False,
                                  crz_info_resume_unlatching: bool = False,
+                                 crz_available: bool = False,
                                  v_ego: float = 0.0) -> list[CanData]:
   if crz_ctrl_hold_request is None:
     crz_ctrl_hold_request = hold_request
@@ -213,11 +219,13 @@ def create_longitudinal_messages(bus: int, accel: float, counter: int, long_acti
   return [
     CanData(CRZ_INFO_ADDR, build_crz_info(accel, counter, long_active, hold_request, v_ego,
                                           hold_latched=hold_latched,
+                                          acc_set_allowed=long_active or crz_available,
                                           resume_unlatching=crz_info_resume_unlatching), bus),
     CanData(CRZ_CTRL_ADDR, build_crz_ctrl(long_active, lead_visible, crz_ctrl_hold_request, hold_latched,
                                           crz_hold_latched=crz_hold_latched,
                                           crz_hold_passive=crz_hold_passive,
-                                          crz_resume_active=crz_resume_active), bus),
+                                          crz_resume_active=crz_resume_active,
+                                          crz_available=crz_available), bus),
   ]
 
 

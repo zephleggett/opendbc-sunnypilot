@@ -4,7 +4,7 @@
 import numpy as np
 import pytest
 
-from opendbc.car.mazda.longitudinal import build_crz_ctrl, build_crz_info, create_radar_heartbeat_messages
+from opendbc.car.mazda.longitudinal import build_crz_ctrl, build_crz_info, create_longitudinal_messages, create_radar_heartbeat_messages
 from opendbc.car.mazda.values import CAR, CarControllerParams
 
 
@@ -76,6 +76,41 @@ class TestMazdaLongitudinalMessages:
 
   def test_inactive_crz_ctrl_matches_stock_radar_standby(self):
     assert build_crz_ctrl(False, False, False, False).hex() == "0201010000000000"
+
+  def test_inactive_available_crz_info_allows_acc_set(self):
+    expected = [
+      "01ffe20004800099",
+      "01ffe20004800198",
+      "01ffe20004800297",
+      "01ffe20004800396",
+      "01ffe20004800495",
+      "01ffe20004800594",
+      "01ffe20004800693",
+      "01ffe20004800792",
+      "01ffe20004800891",
+      "01ffe20004800990",
+      "01ffe20004800a8f",
+      "01ffe20004800b8e",
+      "01ffe20004800c8d",
+      "01ffe20004800d8c",
+      "01ffe20004800e8b",
+      "01ffe20004800f8a",
+    ]
+
+    for counter, dat in enumerate(expected):
+      assert build_crz_info(0.0, counter, False, False, 0.0, acc_set_allowed=True).hex() == dat
+
+  def test_inactive_available_crz_ctrl_sets_available_state(self):
+    assert build_crz_ctrl(False, False, False, False, crz_available=True).hex() == "02010b0000000000"
+
+  @pytest.mark.parametrize(("crz_available", "expected"), [
+    (False, [(0x21b, "01ffe3ffc000005d"), (0x21c, "0201010000000000")]),
+    (True, [(0x21b, "01ffe20004800099"), (0x21c, "02010b0000000000")]),
+  ])
+  def test_inactive_longitudinal_pair_matches_crz_available(self, crz_available, expected):
+    can_sends = create_longitudinal_messages(0, 0.0, 0, False, False, crz_available=crz_available)
+
+    assert [(msg.address, msg.dat.hex()) for msg in can_sends] == expected
 
   def test_radar_heartbeat_matches_empty_stock_radar_tracks(self):
     expected = [
