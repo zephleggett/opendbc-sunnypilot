@@ -20,6 +20,7 @@ CRZ_INFO_ADDR = 0x21B
 CRZ_CTRL_ADDR = 0x21C
 RADAR_STATIC_ADDR = 0x499
 RADAR_TRACK_ADDRS = (0x361, 0x362, 0x363, 0x364, 0x365, 0x366)
+RADAR_SYNTHETIC_LEAD_TRACK_ADDR = 0x364
 
 CRZ_INFO_STANDBY_TEMPLATE = bytes.fromhex("01ffe3ffc0000000")
 CRZ_INFO_TEMPLATE = bytes.fromhex("01ffe20006800000")
@@ -32,6 +33,7 @@ RADAR_TRACK_EMPTY_TEMPLATES = (
   bytes.fromhex("fff7fe7ffbff3fc0"),
   bytes.fromhex("fff7fe7ffbff3fc0"),
 )
+RADAR_SYNTHETIC_LEAD_TRACK_TEMPLATE = bytes.fromhex("0a4000001dc00000")
 
 LONG_COMMAND_STEP = 2
 RADAR_HEARTBEAT_STEP = 10
@@ -230,16 +232,18 @@ def create_longitudinal_messages(bus: int, accel: float, counter: int, long_acti
   ]
 
 
-def build_empty_radar_track(raw: bytes, counter: int) -> bytes:
+def build_radar_track(raw: bytes, counter: int) -> bytes:
   dat = bytearray(raw)
   dat[7] = (dat[7] & 0xf0) | (counter % 16)
   return bytes(dat)
 
 
-def create_radar_heartbeat_messages(bus: int, counter: int) -> list[CanData]:
+def create_radar_heartbeat_messages(bus: int, counter: int, synthetic_lead: bool = False) -> list[CanData]:
   can_sends = [CanData(RADAR_STATIC_ADDR, RADAR_STATIC_TEMPLATE, bus)]
-  can_sends.extend(CanData(addr, build_empty_radar_track(raw, counter), bus)
-                   for addr, raw in zip(RADAR_TRACK_ADDRS, RADAR_TRACK_EMPTY_TEMPLATES, strict=True))
+  for addr, raw in zip(RADAR_TRACK_ADDRS, RADAR_TRACK_EMPTY_TEMPLATES, strict=True):
+    if synthetic_lead and addr == RADAR_SYNTHETIC_LEAD_TRACK_ADDR:
+      raw = RADAR_SYNTHETIC_LEAD_TRACK_TEMPLATE
+    can_sends.append(CanData(addr, build_radar_track(raw, counter), bus))
   return can_sends
 
 

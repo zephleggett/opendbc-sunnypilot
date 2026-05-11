@@ -66,6 +66,19 @@ static bool mazda_empty_radar_track_msg_valid(const CANPacket_t *msg) {
   return valid;
 }
 
+static bool mazda_synthetic_lead_radar_track_msg_valid(const CANPacket_t *msg) {
+  return (msg->addr == MAZDA_RADAR_TRACK_4) &&
+         (msg->data[0] == 0x0aU) && (msg->data[1] == 0x40U) &&
+         (msg->data[2] == 0x00U) && (msg->data[3] == 0x00U) &&
+         (msg->data[4] == 0x1dU) && (msg->data[5] == 0xc0U) &&
+         (msg->data[6] == 0x00U) && ((msg->data[7] & 0xf0U) == 0x00U);
+}
+
+static bool mazda_radar_track_msg_valid(const CANPacket_t *msg) {
+  return mazda_empty_radar_track_msg_valid(msg) ||
+         (controls_allowed && mazda_synthetic_lead_radar_track_msg_valid(msg));
+}
+
 // track msgs coming from OP so that we know what CAM msgs to drop and what to forward
 static void mazda_rx_hook(const CANPacket_t *msg) {
   if ((int)msg->bus == MAZDA_MAIN) {
@@ -189,7 +202,7 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   if (mazda_longitudinal && longitudinal_replacement_bus && ((msg->addr == MAZDA_RADAR_TRACK_1) || (msg->addr == MAZDA_RADAR_TRACK_2) ||
                                                              (msg->addr == MAZDA_RADAR_TRACK_3) || (msg->addr == MAZDA_RADAR_TRACK_4) ||
                                                              (msg->addr == MAZDA_RADAR_TRACK_5) || (msg->addr == MAZDA_RADAR_TRACK_6))) {
-    if (!mazda_empty_radar_track_msg_valid(msg)) {
+    if (!mazda_radar_track_msg_valid(msg)) {
       tx = false;
     }
   }

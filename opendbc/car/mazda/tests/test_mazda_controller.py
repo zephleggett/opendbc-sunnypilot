@@ -138,3 +138,17 @@ class TestMazdaLongitudinalMessages:
   def test_radar_heartbeat_updates_track_counters(self):
     can_sends = create_radar_heartbeat_messages(0, 15)
     assert [msg.dat[-1] for msg in can_sends[1:]] == [0x8f, 0x8f, 0x0f, 0x0f, 0xcf, 0xcf]
+
+  def test_radar_heartbeat_can_advertise_synthetic_lead_track(self):
+    can_sends = create_radar_heartbeat_messages(0, 15, synthetic_lead=True)
+    expected = [
+      (0x499, "0008c00000000000"),
+      (0x361, "fff7fefe1fc0008f"),
+      (0x362, "fff7fefe1fc78c8f"),
+      (0x363, "fff7fefe1fc0000f"),
+      (0x364, "0a4000001dc0000f"),
+      (0x365, "fff7fe7ffbff3fcf"),
+      (0x366, "fff7fe7ffbff3fcf"),
+    ]
+
+    assert [(msg.address, msg.dat.hex()) for msg in can_sends] == expected

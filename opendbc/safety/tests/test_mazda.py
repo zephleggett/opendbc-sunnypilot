@@ -161,7 +161,16 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
         for addr, dat in radar_messages.items():
           self.assertTrue(self._tx(common.make_msg(bus, addr, 8, dat)))
 
-  def test_non_empty_radar_tracks_blocked(self):
+  def test_synthetic_lead_radar_track_allowed(self):
+    for bus in (0, 2):
+      for counter in range(16):
+        dat = bytes.fromhex(f"0a4000001dc0000{counter:x}")
+        self.safety.set_controls_allowed(False)
+        self.assertFalse(self._tx(common.make_msg(bus, 0x364, 8, dat)))
+        self.safety.set_controls_allowed(True)
+        self.assertTrue(self._tx(common.make_msg(bus, 0x364, 8, dat)))
+
+  def test_unexpected_radar_tracks_blocked(self):
     bad_messages = {
       0x499: bytes.fromhex("0008c00100000000"),
       0x361: bytes.fromhex("fff7fefe1fc00180"),

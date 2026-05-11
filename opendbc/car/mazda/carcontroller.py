@@ -105,6 +105,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       effective_resume_requested = False
       release_hold_requested = False
       release_brake = False
+      stop_go_release_requested = False
       if not CC.longActive:
         self.standstill_hold_frames = 0
         self.stop_intent_latched = False
@@ -149,6 +150,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
         release_brake = self.resume_release_frames > 0
         release_hold_requested = base_release_hold_requested or resume_unlatch_requested or release_brake
+        stop_go_release_requested = self.stop_intent_latched and release_hold_requested
 
         if release_hold_requested or (not CS.out.standstill and not stopping and CS.out.vEgo > NEAR_STOP_ENTRY_SPEED):
           self.stop_intent_latched = False
@@ -199,14 +201,17 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       if self.frame % TESTER_PRESENT_STEP == 0:
         can_sends.append(create_radar_tester_present(RADAR_BUS))
 
+      lead_visible = CC.hudControl.leadVisible
+      synthetic_radar_lead = CC.longActive and (lead_visible or stop_go_request or standstill_hold_request or hold_latched or
+                                                crz_hold_latched or crz_hold_passive or crz_ctrl_resume_active or
+                                                stop_go_release_requested or release_brake or starting)
       if self.frame % RADAR_HEARTBEAT_STEP == 0:
         for bus in (RADAR_BUS, CAM_BUS):
-          can_sends.extend(create_radar_heartbeat_messages(bus, self.radar_counter))
+          can_sends.extend(create_radar_heartbeat_messages(bus, self.radar_counter, synthetic_lead=synthetic_radar_lead))
         self.radar_counter = (self.radar_counter + 1) % 16
 
       if self.frame % LONG_COMMAND_STEP == 0:
         long_active = CC.longActive
-        lead_visible = CC.hudControl.leadVisible
         for bus in (RADAR_BUS, CAM_BUS):
           can_sends.extend(create_longitudinal_messages(bus, accel, self.long_counter,
                                                         long_active, lead_visible,
