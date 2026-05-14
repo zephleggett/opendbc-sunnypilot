@@ -82,6 +82,10 @@ class CAR(Platforms):
     [MazdaCarDocs("Mazda CX-5 2022-25")],
     MazdaCX5_2022CarSpecs(mass=3728 * CV.LB_TO_KG, wheelbase=2.698, steerRatio=15.5),
   )
+  MAZDA_CX9_2021_EPS_CX5_2022 = MazdaPlatformConfig(
+    [MazdaCarDocs("MAZDA CX-9 2021 EPS CX-5 2022")],
+    MAZDA_CX9.specs
+  )
 
 
 class LKAS_LIMITS:
