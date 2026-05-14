@@ -2738,6 +2738,18 @@
     ],
     "package": "All"
   },
+  "MAZDA CX-9 2021 EPS CX-5 2022": {
+    "platform": "MAZDA_CX9_2021_EPS_CX5_2022",
+    "make": "MAZDA",
+    "brand": "mazda",
+    "model": "CX-9 2021 EPS CX-5",
+    "year": [
+      "2021",
+      "2022",
+      "2023"
+    ],
+    "package": "All"
+  },
   "Nissan Altima 2019-20, 2024": {
     "platform": "NISSAN_ALTIMA",
     "make": "Nissan",
