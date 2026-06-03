@@ -15,6 +15,8 @@ class CarInterface(CarInterfaceBase):
 
   @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:
+    from opendbc.car.mazda.fingerprints import FW_VERSIONS
+    
     ret.brand = "mazda"
     ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.mazda)]
     ret.radarUnavailable = Bus.radar not in DBC[candidate]
@@ -30,7 +32,8 @@ class CarInterface(CarInterfaceBase):
 
     CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
-    if candidate not in (CAR.MAZDA_CX5_2022,):
+    # 2022+ CX-5 EPS support steer-to-zero
+    if not any(fw.ecu == 'eps' and fw.fwVersion in FW_VERSIONS[CAR.MAZDA_CX5_2022].get((structs.CarParams.Ecu.eps, 0x730, None), []) for fw in car_fw):
       ret.minSteerSpeed = LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS
 
     ret.centerToFront = ret.wheelbase * 0.41
