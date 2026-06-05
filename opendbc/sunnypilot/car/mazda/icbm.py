@@ -30,6 +30,12 @@ LONG_PRESS_HOLD_FRAMES = 60     # 0.6 s at 100 Hz carcontroller cycle
 LONG_PRESS_COOLDOWN_FRAMES = 30  # 0.3 s release between cycles
 LONG_PRESS_SEND_EVERY = 2        # 50 Hz send rate during a hold (overpowers wheel's 10 Hz)
 
+# If the carcontroller didn't call us for more than this many frames, the
+# previous cycle was suppressed (cancel/resume gate in carcontroller). Reset
+# the long-press state machine to idle so we don't resume a stale mid-hold
+# from the wrong starting point.
+SUPPRESSION_GAP_FRAMES = 5  # >50ms gap = was suppressed
+
 
 class IntelligentCruiseButtonManagementInterface(IntelligentCruiseButtonManagementInterfaceBase):
   def __init__(self, CP, CP_SP):
@@ -38,6 +44,21 @@ class IntelligentCruiseButtonManagementInterface(IntelligentCruiseButtonManageme
     self.lp_phase = 'idle'  # 'idle' | 'holding' | 'cooldown'
     self.lp_phase_frames = 0
     self.lp_last_send_button = SendButtonState.none
+    # Per-send CTR ratchet, so 30 sustained sends across a 0.6 s hold do not
+    # collide on the wire (the wheel's crz_btns_counter only advances every
+    # 100 ms at 10 Hz, so without our own ratchet the body ECU could see the
+    # same CTR repeatedly and ignore duplicates).
+    self.lp_ctr_offset = 1
+    # Last frame in which update() was called. Used to detect suppression
+    # gaps from the carcontroller's cancel/resume guard so we don't resume
+    # a stale long-press from the middle.
+    self.lp_last_called_frame = -1
+
+  def _reset_long_press_state(self, send_button=SendButtonState.none):
+    self.lp_phase = 'idle'
+    self.lp_phase_frames = 0
+    self.lp_last_send_button = send_button
+    self.lp_ctr_offset = 1
 
   def update(self, CC_SP, CS, packer, frame, last_button_frame) -> list[CanData]:
     self.CC_SP = CC_SP
@@ -45,10 +66,15 @@ class IntelligentCruiseButtonManagementInterface(IntelligentCruiseButtonManageme
     self.frame = frame
     self.last_button_frame = last_button_frame
 
+    # If we were suppressed for more than a brief cycle (cancel/resume/driver
+    # cancel button held), the long-press state machine could be mid-hold
+    # with frames that no longer correspond to a continuous hold. Reset.
+    if self.lp_last_called_frame >= 0 and (frame - self.lp_last_called_frame) > SUPPRESSION_GAP_FRAMES:
+      self._reset_long_press_state()
+    self.lp_last_called_frame = frame
+
     if self.ICBM.sendButton == SendButtonState.none:
-      self.lp_phase = 'idle'
-      self.lp_phase_frames = 0
-      self.lp_last_send_button = SendButtonState.none
+      self._reset_long_press_state()
       return []
 
     send_button = BUTTONS[self.ICBM.sendButton]
@@ -56,9 +82,7 @@ class IntelligentCruiseButtonManagementInterface(IntelligentCruiseButtonManageme
     # If the controller flipped direction mid-cycle, reset the long-press SM
     # so we don't accidentally hold the opposite button.
     if self.ICBM.sendButton != self.lp_last_send_button:
-      self.lp_phase = 'idle'
-      self.lp_phase_frames = 0
-      self.lp_last_send_button = self.ICBM.sendButton
+      self._reset_long_press_state(self.ICBM.sendButton)
 
     # Remaining magnitude (mph) between current dash and target.
     # ICBM.vTarget is the rounded integer in the locale's speed unit (mph
@@ -67,6 +91,10 @@ class IntelligentCruiseButtonManagementInterface(IntelligentCruiseButtonManageme
     target_mph = int(self.ICBM.vTarget)
     dash_mph = int(round(CS.cruiseState.speed * 2.237))
     remaining_drop_mph = abs(dash_mph - target_mph)
+
+    # Mazda's body ECU clamps CRZ_SPEED at MRCC's 19 mph floor on its own --
+    # commanding a 5 mph step from dash<24 just bottoms out at 19 instead of
+    # going below, so no explicit floor guard is needed here.
 
     if remaining_drop_mph >= LONG_PRESS_THRESHOLD_MPH:
       return self._send_long_press(send_button, packer, CS)
@@ -83,19 +111,28 @@ class IntelligentCruiseButtonManagementInterface(IntelligentCruiseButtonManageme
     During holding we transmit at 50 Hz (every other carcontroller cycle).
     This overpowers the wheel's 10 Hz baseline CRZ_BTNS so the body ECU sees
     a sustained press.
+
+    Counter strategy: each transmitted frame gets a strictly-increasing CTR
+    offset (mod 16) on top of the wheel's current crz_btns_counter, so the
+    body ECU never sees two of our consecutive sends sharing a CTR.
     """
     can_sends = []
 
     if self.lp_phase == 'idle':
       self.lp_phase = 'holding'
       self.lp_phase_frames = 0
+      self.lp_ctr_offset = 1
 
     if self.lp_phase == 'holding':
       if self.lp_phase_frames < LONG_PRESS_HOLD_FRAMES:
         if self.lp_phase_frames % LONG_PRESS_SEND_EVERY == 0:
+          ctr_arg = (CS.crz_btns_counter + self.lp_ctr_offset) % 16
           can_sends.append(mazdacan.create_button_cmd(
-            packer, self.CP, (CS.crz_btns_counter + 1) % 16, send_button
+            packer, self.CP, ctr_arg, send_button
           ))
+          self.lp_ctr_offset = (self.lp_ctr_offset + 1) % 16
+          if self.lp_ctr_offset == 0:
+            self.lp_ctr_offset = 1  # avoid wheel's exact CTR
         self.lp_phase_frames += 1
         if self.lp_phase_frames >= LONG_PRESS_HOLD_FRAMES:
           self.lp_phase = 'cooldown'
