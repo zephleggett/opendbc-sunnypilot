@@ -7,6 +7,7 @@ See the LICENSE.md file in the root directory for more details.
 
 from opendbc.car import structs, DT_CTRL
 from opendbc.car.can_definitions import CanData
+from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.values import Buttons
 from opendbc.sunnypilot.car.intelligent_cruise_button_management_interface_base import IntelligentCruiseButtonManagementInterfaceBase
@@ -30,11 +31,19 @@ LONG_PRESS_HOLD_FRAMES = 60     # 0.6 s at 100 Hz carcontroller cycle
 LONG_PRESS_COOLDOWN_FRAMES = 30  # 0.3 s release between cycles
 LONG_PRESS_SEND_EVERY = 2        # 50 Hz send rate during a hold (overpowers wheel's 10 Hz)
 
-# If the carcontroller didn't call us for more than this many frames, the
-# previous cycle was suppressed (cancel/resume gate in carcontroller). Reset
-# the long-press state machine to idle so we don't resume a stale mid-hold
-# from the wrong starting point.
-SUPPRESSION_GAP_FRAMES = 5  # >50ms gap = was suppressed
+# If the carcontroller skipped us for this many frames or more, the previous
+# cycle was suppressed (cancel/resume gate in carcontroller). Reset the
+# long-press state machine to idle so we don't resume a stale mid-hold from
+# the wrong starting point. The threshold is a >= so a 5-frame (50 ms) gap
+# also triggers the reset (off-by-one was caught in review).
+SUPPRESSION_GAP_FRAMES = 5
+
+# Minimum hold frames committed once a long-press starts. Without a commit,
+# small jitter around the LONG_PRESS_THRESHOLD_MPH boundary (~5 mph remaining
+# drop) would cause the SM to thrash between long and short paths, restarting
+# the body-ECU recognition window each time. Once a hold is started we stay
+# in the long-press SM until at least this many hold frames have elapsed.
+LONG_PRESS_MIN_COMMIT_FRAMES = 20  # 0.2 s -- well below the body ECU's ~0.5 s recognition window
 
 
 class IntelligentCruiseButtonManagementInterface(IntelligentCruiseButtonManagementInterfaceBase):
@@ -66,10 +75,11 @@ class IntelligentCruiseButtonManagementInterface(IntelligentCruiseButtonManageme
     self.frame = frame
     self.last_button_frame = last_button_frame
 
-    # If we were suppressed for more than a brief cycle (cancel/resume/driver
-    # cancel button held), the long-press state machine could be mid-hold
-    # with frames that no longer correspond to a continuous hold. Reset.
-    if self.lp_last_called_frame >= 0 and (frame - self.lp_last_called_frame) > SUPPRESSION_GAP_FRAMES:
+    # If we were suppressed for at least SUPPRESSION_GAP_FRAMES cycles
+    # (cancel/resume/driver cancel button held), the long-press state machine
+    # could be mid-hold with frames that no longer correspond to a continuous
+    # hold on the wire. Reset. (Using >= so the boundary case is covered.)
+    if self.lp_last_called_frame >= 0 and (frame - self.lp_last_called_frame) >= SUPPRESSION_GAP_FRAMES:
       self._reset_long_press_state()
     self.lp_last_called_frame = frame
 
@@ -89,14 +99,20 @@ class IntelligentCruiseButtonManagementInterface(IntelligentCruiseButtonManageme
     # for imperial Mazda US). CS.cruiseState.speed is m/s.
     # TODO-SP: handle metric Mazda variants (10 kph long-press step there).
     target_mph = int(self.ICBM.vTarget)
-    dash_mph = int(round(CS.cruiseState.speed * 2.237))
+    dash_mph = int(round(CS.cruiseState.speed * CV.MS_TO_MPH))
     remaining_drop_mph = abs(dash_mph - target_mph)
 
     # Mazda's body ECU clamps CRZ_SPEED at MRCC's 19 mph floor on its own --
     # commanding a 5 mph step from dash<24 just bottoms out at 19 instead of
     # going below, so no explicit floor guard is needed here.
 
-    if remaining_drop_mph >= LONG_PRESS_THRESHOLD_MPH:
+    # Mode select with a one-cycle commit to prevent threshold thrash. Once a
+    # hold has started, stay in the long-press path for at least
+    # LONG_PRESS_MIN_COMMIT_FRAMES so the body ECU's recognition window is
+    # not restarted by transient remaining_drop dips just below the threshold.
+    committed_to_long = (self.lp_phase != 'idle'
+                         and self.lp_phase_frames < LONG_PRESS_MIN_COMMIT_FRAMES)
+    if remaining_drop_mph >= LONG_PRESS_THRESHOLD_MPH or committed_to_long:
       return self._send_long_press(send_button, packer, CS)
     return self._send_short_press(send_button, packer, CS)
 
@@ -119,9 +135,11 @@ class IntelligentCruiseButtonManagementInterface(IntelligentCruiseButtonManageme
     can_sends = []
 
     if self.lp_phase == 'idle':
+      # lp_ctr_offset is already reset to 1 by _reset_long_press_state on
+      # every entry to idle (sendButton=none, direction flip, or suppression
+      # gap), so no separate init is needed here.
       self.lp_phase = 'holding'
       self.lp_phase_frames = 0
-      self.lp_ctr_offset = 1
 
     if self.lp_phase == 'holding':
       if self.lp_phase_frames < LONG_PRESS_HOLD_FRAMES:
@@ -147,8 +165,10 @@ class IntelligentCruiseButtonManagementInterface(IntelligentCruiseButtonManageme
 
   def _send_short_press(self, send_button, packer, CS) -> list[CanData]:
     """Original single-press behavior for sub-5-mph trim adjustments."""
-    self.lp_phase = 'idle'
-    self.lp_phase_frames = 0
+    # Reset the long-press SM via the shared helper so lp_ctr_offset and
+    # lp_last_send_button stay coherent. We preserve the current direction
+    # so a long->short transition is not treated as a direction flip.
+    self._reset_long_press_state(self.ICBM.sendButton)
 
     can_sends = []
     if (self.frame - self.last_button_frame) * DT_CTRL > 0.2:

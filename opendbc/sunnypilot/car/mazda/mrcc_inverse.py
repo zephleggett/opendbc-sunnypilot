@@ -20,7 +20,11 @@ Empirical sources (see tools/mazda_long/):
   - Validation: -3.55 mph mean prediction bias against 25 holdout SCC Vision
     events in device_data/0000019c-- and device_data/0000019e--.
 """
+import math
+
 import numpy as np
+
+from opendbc.car.common.conversions import Conversions as CV
 
 # === Stage 1: Steady-state asymptote ===
 # Empirical median a_ego (m/s^2) by sustained gap (mph). Negative = decel.
@@ -51,18 +55,19 @@ LONG_PRESS_STEP_MPH = 5
 LONG_PRESS_DURATION_S = 0.6
 LONG_PRESS_COOLDOWN_S = 0.3
 
-MPH_TO_MS = 0.44704
-
 
 def mrcc_steady_decel(gap_mph, conservative=False):
     """Steady-state a_ego (m/s^2) for a sustained gap (mph).
 
     A gap of 0-2 mph is in MRCC's deadband -> returns 0.
     Beyond ~17 mph the response saturates; we cap at the last measured bin.
+    NaN/non-finite inputs return 0 (defensive: prevents NaN propagation
+    through forward_simulate -> inverse_solve -> ICBM state machine).
     """
-    if gap_mph <= 2.0:
+    if not math.isfinite(gap_mph) or gap_mph <= 2.0:
         return 0.0
-    g = float(np.clip(gap_mph, 0, _GAP_MPH[-1]))
+    # max/min on scalar avoids np.clip's array allocation in the hot loop.
+    g = max(0.0, min(float(gap_mph), float(_GAP_MPH[-1])))
     table = _A_EGO_P25 if conservative else _A_EGO
     return float(np.interp(g, _GAP_MPH, table))
 
@@ -78,14 +83,14 @@ def forward_simulate(v_now_mph, sp_command_mph, d_total_m, dt=0.05,
     Assumes sp_command is held constant during the approach (worst case for
     decel -- in practice ICBM would lift it as we close).
     """
-    v = v_now_mph * MPH_TO_MS
-    sp = sp_command_mph * MPH_TO_MS
+    v = v_now_mph * CV.MPH_TO_MS
+    sp = sp_command_mph * CV.MPH_TO_MS
     a_ego = float(a_ego_initial)
     d_remaining = float(d_total_m)
     t = 0.0
     traj = []
     while d_remaining > 0 and t < 30.0:
-        gap_mph = max(0.0, (v - sp) / MPH_TO_MS)
+        gap_mph = max(0.0, (v - sp) / CV.MPH_TO_MS)
         a_target = mrcc_steady_decel(gap_mph, conservative)
 
         # Stage 2: dead time then first-order ramp
@@ -96,10 +101,10 @@ def forward_simulate(v_now_mph, sp_command_mph, d_total_m, dt=0.05,
         v_next = max(sp, v + a_ego * dt)
         d_step = 0.5 * (v + v_next) * dt
         d_remaining -= d_step
-        traj.append((t, v / MPH_TO_MS, a_ego, gap_mph))
+        traj.append((t, v / CV.MPH_TO_MS, a_ego, gap_mph))
         v = v_next
         t += dt
-    return v / MPH_TO_MS, t, traj
+    return v / CV.MPH_TO_MS, t, traj
 
 
 def inverse_solve(v_now_mph, v_target_mph, d_to_target_m,
@@ -126,7 +131,7 @@ def inverse_solve(v_now_mph, v_target_mph, d_to_target_m,
             'sp_command_mph': v_now_mph,
             'achievable': True,
             'predicted_v_at_target_mph': v_now_mph,
-            'time_to_target_s': d_to_target_m / max(v_now_mph * MPH_TO_MS, 1.0) if d_to_target_m > 0 else 0.0,
+            'time_to_target_s': d_to_target_m / max(v_now_mph * CV.MPH_TO_MS, 1.0) if d_to_target_m > 0 else 0.0,
             'shortfall_mph': 0.0,
         }
 
