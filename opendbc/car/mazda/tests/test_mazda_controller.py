@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
 """Tests for Mazda CX-5 2022 steering parameters."""
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
 
-from opendbc.car.mazda.longitudinal import CAM_BUS, RADAR_BUS, build_crz_ctrl, build_crz_info, create_longitudinal_messages, create_radar_heartbeat_messages
+from opendbc.car import uds
+from opendbc.car.mazda.interface import CarInterface
+from opendbc.car.mazda.longitudinal import (
+  CAM_BUS,
+  RADAR_ADDR,
+  RADAR_BUS,
+  build_crz_ctrl,
+  build_crz_info,
+  create_longitudinal_messages,
+  create_radar_heartbeat_messages,
+  request_radar_default_session,
+)
 from opendbc.car.mazda.values import CAR, CarControllerParams
 
 
@@ -152,3 +164,33 @@ class TestMazdaLongitudinalMessages:
     ]
 
     assert [(msg.address, msg.dat.hex()) for msg in can_sends] == expected
+
+  def test_request_radar_default_session_uses_diagnostic_session_control(self):
+    can_recv = Mock()
+    can_send = Mock()
+    request = bytes([uds.SERVICE_TYPE.DIAGNOSTIC_SESSION_CONTROL, uds.SESSION_TYPE.DEFAULT])
+    response = bytes([uds.SERVICE_TYPE.DIAGNOSTIC_SESSION_CONTROL + 0x40, uds.SESSION_TYPE.DEFAULT])
+
+    with patch("opendbc.car.mazda.longitudinal._uds_request", return_value=True) as uds_request:
+      assert request_radar_default_session(can_recv, can_send)
+
+    uds_request.assert_called_once_with(can_recv, can_send, RADAR_BUS, RADAR_ADDR, request, response)
+
+  @pytest.mark.parametrize(("openpilot_longitudinal", "expected_request"), [
+    (False, False),
+    (True, True),
+  ])
+  def test_deinit_requests_radar_default_session_for_longitudinal_control(self, openpilot_longitudinal, expected_request):
+    class FakeCP:
+      openpilotLongitudinalControl = openpilot_longitudinal
+
+    can_recv = Mock()
+    can_send = Mock()
+
+    with patch("opendbc.car.mazda.interface.request_radar_default_session", return_value=True) as default_session:
+      CarInterface.deinit(FakeCP, can_recv, can_send)
+
+    if expected_request:
+      default_session.assert_called_once_with(can_recv, can_send)
+    else:
+      default_session.assert_not_called()

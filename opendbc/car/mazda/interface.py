@@ -4,7 +4,7 @@ from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.carstate import CarState
-from opendbc.car.mazda.longitudinal import enter_radar_programming_session
+from opendbc.car.mazda.longitudinal import enter_radar_programming_session, request_radar_default_session
 from opendbc.car.mazda.radar_interface import RadarInterface
 from opendbc.car.mazda.values import CAR, DBC, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW
 
@@ -77,7 +77,4 @@ class CarInterface(CarInterfaceBase):
   @staticmethod
   def deinit(CP, can_recv, can_send):
     if CP.openpilotLongitudinalControl:
-      # Mazda's radar faults if we explicitly request the default/active session
-      # on teardown. Exiting cleanly is just stopping tester present and letting
-      # the radar time out back to stock behavior on its own.
-      return
+      request_radar_default_session(can_recv, can_send)
