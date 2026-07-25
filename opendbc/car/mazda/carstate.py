@@ -24,6 +24,15 @@ class CarState(CarStateBase, CarStateExt):
     self.accel_button = 0
     self.decel_button = 0
     self.cancel_button = 0
+    self.main_button = 0
+
+  def update_button_enable(self, buttonEvents: list[structs.CarState.ButtonEvent]):
+    if not self.CP.pcmCruise:
+      for b in buttonEvents:
+        if (b.type == ButtonType.accelCruise and b.pressed) or \
+           (b.type == ButtonType.decelCruise and not b.pressed):
+          return True
+    return False
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
@@ -81,12 +90,48 @@ class CarState(CarStateBase, CarStateExt):
     else:
       self.lkas_allowed_speed = True
 
-    # TODO: the signal used for available seems to be the adaptive cruise signal, instead of the main on
-    #       it should be used for carState.cruiseState.nonAdaptive instead
-    ret.cruiseState.available = cp.vl["CRZ_CTRL"]["CRZ_AVAILABLE"] == 1
-    ret.cruiseState.enabled = cp.vl["CRZ_CTRL"]["CRZ_ACTIVE"] == 1
+    # cruise control button events: main/cancel survive radar suppression on
+    # CRZ_BTNS as MODE_X+MODE_Y and CAN_OFF respectively.
+    prev_distance_button = self.distance_button
+    prev_accel_button = self.accel_button
+    prev_decel_button = self.decel_button
+    prev_cancel_button = self.cancel_button
+    prev_main_button = self.main_button
+    self.distance_button = cp.vl["CRZ_BTNS"]["DISTANCE_LESS"]
+    self.accel_button = cp.vl["CRZ_BTNS"]["SET_P"]
+    self.decel_button = cp.vl["CRZ_BTNS"]["SET_M"]
+    self.cancel_button = cp.vl["CRZ_BTNS"]["CAN_OFF"]
+    self.main_button = int(cp.vl["CRZ_BTNS"]["MODE_X"] == 1 and cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
+
+    ret.buttonEvents = [
+      *create_button_events(self.distance_button, prev_distance_button, {1: ButtonType.gapAdjustCruise}),
+      *create_button_events(self.accel_button, prev_accel_button, {1: ButtonType.accelCruise}),
+      *create_button_events(self.decel_button, prev_decel_button, {1: ButtonType.decelCruise}),
+      *create_button_events(self.cancel_button, prev_cancel_button, {1: ButtonType.cancel}),
+      *create_button_events(self.main_button, prev_main_button, {1: ButtonType.mainCruise}),
+    ]
+
+    # In alpha-long mode the radar-owned CRZ_CTRL frame is intentionally
+    # suppressed, so do not subscribe to it here or card will mark CAN invalid
+    # once the stock frame times out after takeover. On Mazda, PEDALS.ACC_OFF
+    # is asserted while MRCC is armed but not actively controlling, and
+    # PEDALS.ACC_ACTIVE is asserted once stock ACC takes over. Treat either
+    # state as cruise available so MADS does not interpret a stock ACC engage
+    # as the MRCC main switch turning off.
+    if self.CP.openpilotLongitudinalControl:
+      acc_armed = cp.vl["PEDALS"]["ACC_OFF"] == 1
+      acc_active = cp.vl["PEDALS"]["ACC_ACTIVE"] == 1
+      ret.cruiseState.available = acc_armed or acc_active
+      ret.cruiseState.enabled = acc_active
+    else:
+      # TODO: the signal used for available seems to be the adaptive cruise signal,
+      # instead of the main on. It should be used for
+      # carState.cruiseState.nonAdaptive instead.
+      ret.cruiseState.available = cp.vl["CRZ_CTRL"]["CRZ_AVAILABLE"] == 1
+      ret.cruiseState.enabled = cp.vl["CRZ_CTRL"]["CRZ_ACTIVE"] == 1
     ret.cruiseState.standstill = cp.vl["PEDALS"]["STANDSTILL"] == 1
     ret.cruiseState.speed = cp.vl["CRZ_EVENTS"]["CRZ_SPEED"] * CV.KPH_TO_MS
+    ret.cruiseState.speedCluster = ret.cruiseState.speed
 
     # stock lkas should be on
     # TODO: is this needed?
@@ -118,30 +163,7 @@ class CarState(CarStateBase, CarStateExt):
     self.cam_laneinfo = cp_cam.vl["CAM_LANEINFO"]
     ret.steerFaultPermanent = cp_cam.vl["CAM_LKAS"]["ERR_BIT_1"] == 1
 
-    # cruise control button events: distance, inc, dec, and cancel
-    prev_distance_button = self.distance_button
-    prev_accel_button = self.accel_button
-    prev_decel_button = self.decel_button
-    prev_cancel_button = self.cancel_button
-    self.distance_button = cp.vl["CRZ_BTNS"]["DISTANCE_LESS"]
-    # On CX-5 2022 the wheel "+" button toggles SET_P (not RES); RES is the resume button.
-    # Verified against route 0000019c--84a5408a38 seg2/3: holding "+" emits SET_P=1, body ECU increments CRZ_SPEED.
-    self.accel_button = cp.vl["CRZ_BTNS"]["SET_P"]
-    self.decel_button = cp.vl["CRZ_BTNS"]["SET_M"]
-    # CAN_OFF carries the cancel intent. Without an event here, ICBM's readiness gate never
-    # learns the driver is canceling, so it keeps spamming CRZ_BTNS with cancel=0 and the
-    # body ECU treats the latest non-cancel frame as authoritative. Critical for cancel-safety.
-    self.cancel_button = cp.vl["CRZ_BTNS"]["CAN_OFF"]
-
-    ret.buttonEvents = [
-      *create_button_events(self.distance_button, prev_distance_button, {1: ButtonType.gapAdjustCruise}),
-      *create_button_events(self.accel_button, prev_accel_button, {1: ButtonType.accelCruise}),
-      *create_button_events(self.decel_button, prev_decel_button, {1: ButtonType.decelCruise}),
-      *create_button_events(self.cancel_button, prev_cancel_button, {1: ButtonType.cancel}),
-    ]
-
     CarStateExt.update(self, ret, ret_sp, can_parsers)
-
     return ret, ret_sp
 
   @staticmethod

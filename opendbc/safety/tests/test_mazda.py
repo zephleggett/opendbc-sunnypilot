@@ -103,5 +103,125 @@ class TestMazdaIgnition(unittest.TestCase):
     self.assertFalse(self.safety.get_ignition_can())
 
 
+class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafetyTest):
+
+  TX_MSGS = [[0x243, 0], [0x09d, 0], [0x440, 0], [0x21b, 0], [0x21c, 0], [0x499, 0],
+             [0x361, 0], [0x362, 0], [0x363, 0], [0x364, 0], [0x365, 0], [0x366, 0], [0x764, 0],
+             [0x21b, 2], [0x21c, 2], [0x499, 2], [0x361, 2], [0x362, 2], [0x363, 2], [0x364, 2], [0x365, 2], [0x366, 2]]
+  MAX_ACCEL = 2000.0
+  MIN_ACCEL = -2000.0
+  INACTIVE_ACCEL = 0.0
+
+  def setUp(self):
+    self.packer = CANPackerSafety("mazda_2017")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, 1)
+    self.safety.init_tests()
+
+  def _pcm_status_msg(self, enable):
+    values = {"ACC_ACTIVE": enable, "BRAKE_ON": 0}
+    return self.packer.make_can_msg_safety("PEDALS", 0, values)
+
+  def _accel_msg(self, accel: float, bus: int = 0):
+    values = {"ACCEL_CMD": accel}
+    return self.packer.make_can_msg_safety("CRZ_INFO", bus, values)
+
+  def _crz_ctrl_cmd_msg(self, active: bool, bus: int = 0):
+    values = {"CRZ_ACTIVE": active}
+    return self.packer.make_can_msg_safety("CRZ_CTRL", bus, values)
+
+  def test_stock_crz_info_standby_allowed(self):
+    for controls_allowed in (False, True):
+      self.safety.set_controls_allowed(controls_allowed)
+      for bus in (0, 2):
+        for counter in range(16):
+          # Stock standby looks like a high raw accel command if decoded without
+          # first checking the inactive CRZ_INFO state.
+          checksum = (0x5d - counter) & 0xff
+          dat = bytes.fromhex(f"01ffe3ffc000{counter:02x}{checksum:02x}")
+          self.assertTrue(self._tx(common.make_msg(bus, 0x21b, 8, dat)))
+
+        bad_checksum = bytes.fromhex("01ffe3ffc0000000")
+        self.assertFalse(self._tx(common.make_msg(bus, 0x21b, 8, bad_checksum)))
+
+  def test_empty_radar_tracks_allowed(self):
+    radar_messages = {
+      0x499: bytes.fromhex("0008c00000000000"),
+      0x361: bytes.fromhex("fff7fefe1fc00080"),
+      0x362: bytes.fromhex("fff7fefe1fc78c80"),
+      0x363: bytes.fromhex("fff7fefe1fc00000"),
+      0x364: bytes.fromhex("fff7fefe1fc00000"),
+      0x365: bytes.fromhex("fff7fe7ffbff3fc0"),
+      0x366: bytes.fromhex("fff7fe7ffbff3fc0"),
+    }
+
+    for controls_allowed in (False, True):
+      self.safety.set_controls_allowed(controls_allowed)
+      for bus in (0, 2):
+        for addr, dat in radar_messages.items():
+          self.assertTrue(self._tx(common.make_msg(bus, addr, 8, dat)))
+
+  def test_synthetic_lead_radar_track_allowed(self):
+    for bus in (0, 2):
+      for counter in range(16):
+        dat = bytes.fromhex(f"0a4000001dc0000{counter:x}")
+        self.safety.set_controls_allowed(False)
+        self.assertFalse(self._tx(common.make_msg(bus, 0x364, 8, dat)))
+        self.safety.set_controls_allowed(True)
+        self.assertTrue(self._tx(common.make_msg(bus, 0x364, 8, dat)))
+
+  def test_unexpected_radar_tracks_blocked(self):
+    bad_messages = {
+      0x499: bytes.fromhex("0008c00100000000"),
+      0x361: bytes.fromhex("fff7fefe1fc00180"),
+      0x362: bytes.fromhex("fff7fefe1fc00080"),
+      0x363: bytes.fromhex("fff7fefe1fc00080"),
+      0x364: bytes.fromhex("fff7fefe1fc00080"),
+      0x365: bytes.fromhex("fff7fe7ffbff3f80"),
+      0x366: bytes.fromhex("fff7fe7ffbff3f80"),
+    }
+
+    self.safety.set_controls_allowed(True)
+    for bus in (0, 2):
+      for addr, dat in bad_messages.items():
+        self.assertFalse(self._tx(common.make_msg(bus, addr, 8, dat)))
+
+  def test_radar_uds_only_allowed_on_main_bus(self):
+    self.assertTrue(self._tx(common.make_msg(0, 0x764, 8, bytes.fromhex("023e800000000000"))))
+    self.assertFalse(self._tx(common.make_msg(2, 0x764, 8, bytes.fromhex("023e800000000000"))))
+
+  def test_crz_ctrl_camera_bus_checks_active_state(self):
+    for bus in (0, 2):
+      self.safety.set_controls_allowed(False)
+      self.assertFalse(self._tx(self._crz_ctrl_cmd_msg(True, bus)))
+      self.assertTrue(self._tx(self._crz_ctrl_cmd_msg(False, bus)))
+
+      self.safety.set_controls_allowed(True)
+      self.assertTrue(self._tx(self._crz_ctrl_cmd_msg(True, bus)))
+
+  def test_accel_actuation_limits(self):
+    # CRZ_INFO.ACCEL_CMD is a raw integer command in Mazda's DBC, so use
+    # integer-domain boundaries to avoid float rounding artifacts in packing.
+    limits = ((self.MIN_ACCEL, self.MAX_ACCEL, common.ALTERNATIVE_EXPERIENCE.DEFAULT),
+              (self.MIN_ACCEL, self.MAX_ACCEL, common.ALTERNATIVE_EXPERIENCE.RAISE_LONGITUDINAL_LIMITS_TO_ISO_MAX))
+
+    for min_accel, max_accel, alternative_experience in limits:
+      for accel in range(int(min_accel) - 1, int(max_accel) + 2):
+        for controls_allowed in [True, False]:
+          self.safety.set_controls_allowed(controls_allowed)
+          self.safety.set_alternative_experience(alternative_experience)
+          should_tx = controls_allowed and min_accel <= accel <= max_accel
+          should_tx = should_tx or accel == self.INACTIVE_ACCEL
+          self.assertEqual(should_tx, self._tx(self._accel_msg(float(accel))))
+
+  def test_camera_bus_accel_actuation_limits(self):
+    for accel in (self.MIN_ACCEL - 1, self.MIN_ACCEL, self.INACTIVE_ACCEL, self.MAX_ACCEL, self.MAX_ACCEL + 1):
+      for controls_allowed in (True, False):
+        self.safety.set_controls_allowed(controls_allowed)
+        should_tx = controls_allowed and self.MIN_ACCEL <= accel <= self.MAX_ACCEL
+        should_tx = should_tx or accel == self.INACTIVE_ACCEL
+        self.assertEqual(should_tx, self._tx(self._accel_msg(float(accel), bus=2)))
+
+
 if __name__ == "__main__":
   unittest.main()
