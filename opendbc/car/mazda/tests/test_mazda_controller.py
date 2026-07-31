@@ -255,42 +255,45 @@ class TestStopAndGoStateMachine:
     assert self.run(sm, 1, stopping=False) == StopGoState.CRUISING
 
 
-LongCtrlState = None  # bound in the fixture from structs
-
-
-def _mock_cc(long_active, accel, long_state, standstill, gas, override, resume, lead_visible, gap, available):
+def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas=False, override=False,
+             resume=False, lead_visible=True, gap=2, available=True,
+             stock_radar_alive=False, fsc_settled=True, handback=False, cruise_engaged=False):
   out = SimpleNamespace(standstill=standstill, gasPressed=gas,
-                        cruiseState=SimpleNamespace(available=available))
+                        cruiseState=SimpleNamespace(available=available, enabled=cruise_engaged))
   actuators = SimpleNamespace(accel=accel, longControlState=long_state)
   cruise = SimpleNamespace(resume=resume, override=override, cancel=False)
   hud = SimpleNamespace(leadVisible=lead_visible, leadDistanceBars=gap)
   cc = SimpleNamespace(longActive=long_active, actuators=actuators, cruiseControl=cruise, hudControl=hud)
-  cs = SimpleNamespace(out=out, resume_button=0)
-  return cc, cs
+  cc_sp = SimpleNamespace(stockEcuHandBack=handback)
+  cs = SimpleNamespace(out=out, resume_button=0,
+                       stock_radar_alive=stock_radar_alive, fsc_settled=fsc_settled)
+  return cc, cc_sp, cs
+
+
+@pytest.fixture
+def cc():
+  CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], alpha_long=True,
+                               is_release=False, docs=False)
+  CP_SP = CarInterface.get_params_sp(CP, CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], True, False, False)
+  assert CP.openpilotLongitudinalControl
+  return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
+
+
+def _step(cc, **kw):
+  from opendbc.car import structs
+  kw.setdefault("long_state", structs.CarControl.Actuators.LongControlState.pid)
+  control, control_sp, carstate = _mock_cc(**kw)
+  sends = cc.update_longitudinal(control, control_sp, carstate, virtual_resume_sent=False)
+  cc.frame += 1
+  return sends
 
 
 class TestLongitudinalIntegration:
   """Drives the real CarController.update_longitudinal through an engage -> cruise -> stop ->
   hold -> resume timeline and checks the emitted CAN, not just the state machine in isolation."""
 
-  @pytest.fixture
-  def cc(self):
-    CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], alpha_long=True,
-                                 is_release=False, docs=False)
-    CP_SP = CarInterface.get_params_sp(CP, CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], True, False, False)
-    assert CP.openpilotLongitudinalControl
-    return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
-
   def _step(self, cc, **kw):
-    from opendbc.car import structs
-    long_state = kw.pop("long_state", structs.CarControl.Actuators.LongControlState.pid)
-    params = dict(long_active=True, accel=0.5, long_state=long_state, standstill=False,
-                  gas=False, override=False, resume=False, lead_visible=True, gap=2, available=True)
-    params.update(kw)
-    control, carstate = _mock_cc(**params)
-    sends = cc.update_longitudinal(control, carstate, virtual_resume_sent=False)
-    cc.frame += 1
-    return sends
+    return _step(cc, **kw)
 
   def test_engaged_frame_rates_and_counters(self, cc):
     from opendbc.car import structs
@@ -368,3 +371,102 @@ class TestLongitudinalIntegration:
     sends = self._step(cc, long_active=False, long_state=off, available=True)
     info = next(dat for a, dat, b in sends if a == 0x21b and b == 0)
     assert info.hex().startswith("01ffe2000480")
+
+
+SESSION_PROG_DAT = bytes([0x02, 0x10, 0x02, 0, 0, 0, 0, 0])
+SESSION_DFLT_DAT = bytes([0x02, 0x10, 0x01, 0, 0, 0, 0, 0])
+TESTER_PRESENT_DAT = bytes([0x02, 0x3e, 0x80, 0, 0, 0, 0, 0])
+
+
+class TestRadarSessionSequencing:
+  """Boot teardown deferral and the ordered hand-back: what goes on the bus in each
+  radar session state, driven through the real CarController.update_longitudinal."""
+
+  def _step(self, cc, stock_radar_alive, fsc_settled, handback=False, cruise_engaged=False):
+    from opendbc.car import structs
+    off = structs.CarControl.Actuators.LongControlState.off
+    return _step(cc, long_active=False, accel=0., long_state=off, lead_visible=False, available=False,
+                 stock_radar_alive=stock_radar_alive, fsc_settled=fsc_settled,
+                 handback=handback, cruise_engaged=cruise_engaged)
+
+  @staticmethod
+  def _uds(sends):
+    return [dat for a, dat, b in sends if a == 0x764]
+
+  @staticmethod
+  def _synthetic(sends):
+    return [a for a, _, _ in sends if a in (0x21b, 0x21c, 0x499)]
+
+  def test_stock_state_is_silent(self, cc):
+    # radar alive, gate not yet passed: nothing at all goes on the bus
+    for _ in range(200):
+      sends = self._step(cc, stock_radar_alive=True, fsc_settled=False)
+      assert sends == []
+
+  def test_boot_teardown_sequence(self, cc):
+    # gate passes with the stock radar alive: programming-session requests at 2 Hz,
+    # still no synthetic frames and no tester present
+    for i in range(100):
+      sends = self._step(cc, stock_radar_alive=True, fsc_settled=True)
+      if i % CarControllerParams.RADAR_UDS_STEP == 0:
+        assert self._uds(sends) == [SESSION_PROG_DAT]
+      else:
+        assert self._uds(sends) == []
+      assert self._synthetic(sends) == []
+    # radar goes quiet: synthetic frames + tester present take over, session requests stop
+    saw_tester = False
+    for _ in range(100):
+      frame = cc.frame
+      sends = self._step(cc, stock_radar_alive=False, fsc_settled=True)
+      assert SESSION_PROG_DAT not in self._uds(sends)
+      if frame % CarControllerParams.LONG_STEP == 0:
+        assert len(self._synthetic(sends)) > 0
+      saw_tester |= TESTER_PRESENT_DAT in self._uds(sends)
+    assert saw_tester
+
+  def test_handback_sequence(self, cc):
+    # reach SILENCED
+    self._step(cc, stock_radar_alive=False, fsc_settled=True)
+    # hand-back requested: default-session requests at 2 Hz, tester present stops,
+    # synthetic frames continue while the radar is still quiet
+    saw_default = False
+    for _ in range(100):
+      frame = cc.frame
+      sends = self._step(cc, stock_radar_alive=False, fsc_settled=True, handback=True)
+      assert TESTER_PRESENT_DAT not in self._uds(sends)
+      saw_default |= SESSION_DFLT_DAT in self._uds(sends)
+      if frame % CarControllerParams.LONG_STEP == 0:
+        assert len(self._synthetic(sends)) > 0
+    assert saw_default
+    # stock radar returns: everything stops
+    for _ in range(200):
+      sends = self._step(cc, stock_radar_alive=True, fsc_settled=True, handback=True)
+      assert sends == []
+
+  def test_handback_before_teardown_stops_everything(self, cc):
+    # toggle-off while still waiting on the gate: no session ever entered, so no
+    # hand-back traffic either
+    self._step(cc, stock_radar_alive=True, fsc_settled=False)
+    for _ in range(120):
+      sends = self._step(cc, stock_radar_alive=True, fsc_settled=False, handback=True)
+      assert sends == []
+
+  def test_teardown_waits_for_stock_cruise_disengage(self, cc):
+    # driver engaged stock MRCC before the gate passed (warm boot): hold the teardown
+    for _ in range(120):
+      sends = self._step(cc, stock_radar_alive=True, fsc_settled=True, cruise_engaged=True)
+      assert sends == []
+    # driver disengages: teardown proceeds
+    cc.frame = 0
+    sends = self._step(cc, stock_radar_alive=True, fsc_settled=True, cruise_engaged=False)
+    assert SESSION_PROG_DAT in self._uds(sends)
+
+  def test_s3_recovery_resilences(self, cc):
+    # radar reappears mid-drive (dropped tester present, S3 timeout): re-request the session
+    self._step(cc, stock_radar_alive=False, fsc_settled=True)
+    cc.frame = CarControllerParams.RADAR_UDS_STEP  # align to a session-request frame
+    sends = self._step(cc, stock_radar_alive=True, fsc_settled=True)
+    assert SESSION_PROG_DAT in self._uds(sends)
+    # and settles back to silenced once quiet again
+    sends = self._step(cc, stock_radar_alive=False, fsc_settled=True)
+    assert SESSION_PROG_DAT not in self._uds(sends)

@@ -1,11 +1,15 @@
 from opendbc.can import CANDefine, CANParser
-from opendbc.car import Bus, create_button_events, structs
+from opendbc.car import Bus, DT_CTRL, create_button_events, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.mazda.values import DBC, LKAS_LIMITS
+from opendbc.car.mazda.values import DBC, LKAS_LIMITS, CarControllerParams
 from opendbc.sunnypilot.car.mazda.carstate_ext import CarStateExt
 
 ButtonType = structs.CarState.ButtonEvent.Type
+
+FSC_SETTLE_FRAMES = int(CarControllerParams.FSC_SETTLE_T / DT_CTRL)
+STOCK_RADAR_ALIVE_FRAMES = int(CarControllerParams.STOCK_RADAR_ALIVE_T / DT_CTRL)
+STOCK_RADAR_GUARD_FRAMES = int(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CTRL)
 
 
 class CarState(CarStateBase, CarStateExt):
@@ -31,6 +35,16 @@ class CarState(CarStateBase, CarStateExt):
     self.cruise_enabled = False
     self.brake_pressed_prev = False
     self.stock_radar_silent_frames = 0
+    self.cam_laneinfo_seen = False
+    self.fsc_settled_frames = 0
+
+  @property
+  def fsc_settled(self) -> bool:
+    return self.fsc_settled_frames >= FSC_SETTLE_FRAMES
+
+  @property
+  def stock_radar_alive(self) -> bool:
+    return self.stock_radar_silent_frames < STOCK_RADAR_ALIVE_FRAMES
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
@@ -106,14 +120,27 @@ class CarState(CarStateBase, CarStateExt):
       ret.cruiseState.available = self.cruise_available
       ret.cruiseState.enabled = self.cruise_enabled
 
-      # Two-master guard: while the stock radar still broadcasts CRZ_INFO (teardown failed,
-      # or the radar recovered through its S3 timeout), our synthetic frames would fight it
-      # on the bus, so block longitudinal engagement until it has been silent for 1 second.
+      # Two-master guard: while the stock radar still broadcasts CRZ_INFO (teardown pending
+      # or failed, or the radar recovered through its S3 timeout), our synthetic frames
+      # would fight it on the bus, so block longitudinal engagement until it has been
+      # silent for 1 second.
       if len(cp.vl_all["CRZ_INFO"]["CTR1"]) > 0:
         self.stock_radar_silent_frames = 0
       else:
         self.stock_radar_silent_frames += 1
-      ret.accFaulted = self.stock_radar_silent_frames < 100
+      ret.accFaulted = self.stock_radar_silent_frames < STOCK_RADAR_GUARD_FRAMES
+
+      # FSC settle timer (the radar teardown gate): the camera broadcasts a
+      # boot-in-progress state on CAM_LANEINFO (NO_ERR_BIT + BIT2, pure boot markers
+      # clearing at 2.8-6.0 s and never set again while driving), then runs a
+      # radar-presence check in the following seconds. A latched fault (ERR_BIT) also
+      # shows the boot markers clear, so it must hold the timer at zero. The seen latch
+      # matters: before the first frame the parser reads all-zero, which would count as
+      # settled.
+      self.cam_laneinfo_seen |= len(cp_cam.vl_all["CAM_LANEINFO"]["LANE_LINES"]) > 0
+      laneinfo = cp_cam.vl["CAM_LANEINFO"]
+      settled = self.cam_laneinfo_seen and not any(laneinfo[s] for s in ("NO_ERR_BIT", "BIT2", "ERR_BIT"))
+      self.fsc_settled_frames = self.fsc_settled_frames + 1 if settled else 0
     else:
       # TODO: the signal used for available seems to be the adaptive cruise signal, instead of the main on
       #       it should be used for carState.cruiseState.nonAdaptive instead
@@ -193,6 +220,8 @@ class CarState(CarStateBase, CarStateExt):
       # teardown, and its presence is what the two-master guard watches for
       pt_messages.append(("CRZ_INFO", float("nan")))
     cam_messages = [
+      # read through vl_all, which unlike vl has no lazy registration
+      ("CAM_LANEINFO", 0),
       ("CAM_TRAFFIC_SIGNS", 0),
     ]
     return {
