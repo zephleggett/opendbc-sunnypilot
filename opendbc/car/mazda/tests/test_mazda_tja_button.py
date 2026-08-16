@@ -3,6 +3,7 @@
 
 Physical TJA rising edge emits ButtonType.lkas once. MRCC is OEM-only and must
 not emit lkas or mainCruise. cruiseState follows PEDALS, never a TJA override.
+Stock longitudinal leaves TJA out of the openpilot-long MADS path.
 """
 
 from opendbc.can import CANPacker
@@ -13,13 +14,13 @@ from opendbc.car.mazda.values import CAR
 ButtonType = structs.CarState.ButtonEvent.Type
 
 
-def _ci():
+def _ci(*, alpha_long=True):
   fingerprint = gen_empty_fingerprint()
-  CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, fingerprint, [], alpha_long=True,
+  CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, fingerprint, [], alpha_long=alpha_long,
                                is_release=False, docs=False)
   CP_SP = CarInterface.get_params_sp(CP, CAR.MAZDA_CX5_2022, fingerprint, [],
-                                     alpha_long=True, is_release_sp=False, docs=False)
-  assert CP.openpilotLongitudinalControl
+                                     alpha_long=alpha_long, is_release_sp=False, docs=False)
+  assert CP.openpilotLongitudinalControl == alpha_long
   return CarInterface(CP, CP_SP)
 
 
@@ -43,8 +44,8 @@ def _crz_btns(packer, *, tja=0, mrcc=0, set_p=0, set_m=0, res=0, can_off=0, mode
 
 
 class ButtonHarness:
-  def __init__(self):
-    self.ci = _ci()
+  def __init__(self, *, alpha_long=True):
+    self.ci = _ci(alpha_long=alpha_long)
     self.packer = CANPacker("mazda_2017")
     self.t = 0
 
@@ -191,3 +192,19 @@ class TestMazdaTjaButton:
     assert not off.cruiseState.available
     assert not off.cruiseState.enabled
     assert not _events(off, ButtonType.lkas)
+
+  def test_stock_long_does_not_decode_tja(self):
+    # Stock long forces tja_button=0, so physical TJA must not emit lkas.
+    h = ButtonHarness(alpha_long=False)
+    assert not h.ci.CP.openpilotLongitudinalControl
+    h.step()
+    rising = h.step(tja=1)
+    assert not _events(rising, ButtonType.lkas)
+    assert not _events(rising, ButtonType.mainCruise)
+    held = h.step(tja=1)
+    assert not _events(held, ButtonType.lkas)
+    release = h.step(tja=0)
+    assert not _events(release, ButtonType.lkas)
+    second = h.step(tja=1)
+    assert not _events(second, ButtonType.lkas)
+    assert not _events(second, ButtonType.mainCruise)
