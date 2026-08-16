@@ -30,6 +30,7 @@ class CarState(CarStateBase, CarStateExt):
     self.cancel_button = 0
     self.resume_button = 0
     self.main_button = 0
+    self.tja_button = 0
 
     self.cruise_available = False
     self.cruise_enabled = False
@@ -187,6 +188,7 @@ class CarState(CarStateBase, CarStateExt):
     prev_cancel_button = self.cancel_button
     prev_resume_button = self.resume_button
     prev_main_button = self.main_button
+    prev_tja_button = self.tja_button
     self.distance_button = cp.vl["CRZ_BTNS"]["DISTANCE_LESS"]
     # On CX-5 2022 the wheel "+" button toggles SET_P (not RES); RES is the resume button.
     # Verified against route 0000019c--84a5408a38 seg2/3: holding "+" emits SET_P=1, body ECU increments CRZ_SPEED.
@@ -198,6 +200,12 @@ class CarState(CarStateBase, CarStateExt):
     self.cancel_button = cp.vl["CRZ_BTNS"]["CAN_OFF"]
     self.resume_button = cp.vl["CRZ_BTNS"]["RES"]
     self.main_button = int(cp.vl["CRZ_BTNS"]["MODE_X"] == 1 and cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
+    # Physical TJA is the only MADS toggle (ButtonType.lkas). MRCC stays OEM:
+    # it is not decoded into buttonEvents and must not share a mainCruise master.
+    if self.CP.openpilotLongitudinalControl:
+      self.tja_button = int(cp.vl["CRZ_BTNS"]["TJA_BUTTON"] == 1)
+    else:
+      self.tja_button = 0
 
     ret.buttonEvents = [
       *create_button_events(self.distance_button, prev_distance_button, {1: ButtonType.gapAdjustCruise}),
@@ -206,6 +214,7 @@ class CarState(CarStateBase, CarStateExt):
       *create_button_events(self.cancel_button, prev_cancel_button, {1: ButtonType.cancel}),
       *create_button_events(self.resume_button, prev_resume_button, {1: ButtonType.resumeCruise}),
       *create_button_events(self.main_button, prev_main_button, {1: ButtonType.mainCruise}),
+      *create_button_events(self.tja_button, prev_tja_button, {1: ButtonType.lkas}),
     ]
 
     CarStateExt.update(self, ret, ret_sp, can_parsers)
@@ -222,7 +231,10 @@ class CarState(CarStateBase, CarStateExt):
     cam_messages = [
       # read through vl_all, which unlike vl has no lazy registration
       ("CAM_LANEINFO", 0),
-      ("CAM_TRAFFIC_SIGNS", 0),
+      # Present on some Mazda cameras only. The 2020 CX-9 model-test route has
+      # zero 0x35f frames; a freq-0 liveness check makes canValid false for the
+      # entire route (5745 invalid iterations). Not used by TJA/MADS/MRCC.
+      ("CAM_TRAFFIC_SIGNS", float("nan")),
     ]
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, 0),
