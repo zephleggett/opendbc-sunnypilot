@@ -80,14 +80,13 @@ def create_radar_frames(bus, counter, synthetic_lead):
 
 
 def fsc_cam_lkas_allows_steer(lkas) -> bool:
-  # FSC CAM_LKAS LINE_NOT_VISIBLE=1 and ERR_BIT_* mean the camera is not commanding
-  # steer. On the CX-5 2025 routes that latched an LKAS fault, FSC LNV stayed 1 on
-  # every bus2 frame and FSC LKAS_REQUEST stayed 0; comma forcing LNV=0 while
-  # sending torque was the CAM_LKAS mismatch. Copy FSC LNV and do not request
-  # torque against that state.
-  return (int(lkas.get("LINE_NOT_VISIBLE", 1)) == 0 and
-          int(lkas.get("ERR_BIT_1", 0)) == 0 and
-          int(lkas.get("ERR_BIT_2", 0)) == 0)
+  # FSC ERR_BIT_1/2 is a real camera fault (steerFaultPermanent). Do not keep
+  # requesting torque against that. LINE_NOT_VISIBLE is a CAM_LKAS field to copy
+  # for coherence, not a steering-permission gate: public FSC bus2
+  # 60ed2cf2b490292c|2023-11-21--17-47-15 sent LNV=1 with nonzero LKAS_REQUEST
+  # (133 checksum-valid frames, 4 runs) and the CX-5 2025 faulting routes
+  # mismatched comma LNV=0 vs FSC LNV=1, not "nonzero request while LNV=1".
+  return int(lkas.get("ERR_BIT_1", 0)) == 0 and int(lkas.get("ERR_BIT_2", 0)) == 0
 
 
 def create_steering_control(packer, CP, frame, apply_torque, lkas):

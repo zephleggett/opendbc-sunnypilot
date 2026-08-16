@@ -2,13 +2,20 @@
 """CAM_LKAS LINE_NOT_VISIBLE must stay coherent with FSC.
 
 Comma used to hard-force LINE_NOT_VISIBLE=0 while requesting torque. On the
-CX-5 2025 routes that latched an LKAS fault, FSC CAM_LKAS LNV stayed 1 and
-FSC LKAS_REQUEST stayed 0. Production now copies FSC LNV and will not put a
-nonzero LKAS_REQUEST on the wire against LNV=1 or ERR_BIT_*.
+CX-5 2025 routes that latched an LKAS fault, that LNV mismatch (FSC=1,
+comma=0) was the bad field. Production copies FSC LNV.
+
+LINE_NOT_VISIBLE is not a steering-permission gate. Public FSC bus2
+60ed2cf2b490292c|2023-11-21--17-47-15 sent LNV=1 with nonzero LKAS_REQUEST
+(checksum-valid). FSC ERR_BIT_1/2 still zeros the request. Panda/MADS
+authorization is CC.latActive, not LNV.
 """
+
+import random
 
 from opendbc.can import CANPacker, CANParser
 from opendbc.car import structs
+from opendbc.car.can_definitions import CanData
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR
@@ -18,6 +25,8 @@ from opendbc.car.mazda.values import CAR
 ROUTE36_FSC_PREFAULT = bytes.fromhex("48000820020000c3")
 # same route, first FSC ERR_BIT_1/2 frame
 ROUTE36_FSC_FAULT = bytes.fromhex("68000960020000b0")
+# public FSC-origin LNV=1 + nonzero request (checksum-valid)
+PUBLIC_FSC_LNV1_NZ = bytes.fromhex("17a5082002000022")
 
 
 def _cp():
@@ -74,15 +83,16 @@ class TestFscCamLkasAllowsSteer:
   def test_lnv0_no_err_allows(self):
     assert mazdacan.fsc_cam_lkas_allows_steer(_lkas(lnv=0))
 
-  def test_lnv1_blocks(self):
-    assert not mazdacan.fsc_cam_lkas_allows_steer(_lkas(lnv=1))
+  def test_lnv1_does_not_block(self):
+    assert mazdacan.fsc_cam_lkas_allows_steer(_lkas(lnv=1))
 
   def test_err_bits_block(self):
     assert not mazdacan.fsc_cam_lkas_allows_steer(_lkas(lnv=0, err1=1))
     assert not mazdacan.fsc_cam_lkas_allows_steer(_lkas(lnv=0, err2=1))
+    assert not mazdacan.fsc_cam_lkas_allows_steer(_lkas(lnv=1, err1=1, err2=1))
 
-  def test_missing_lnv_defaults_blocked(self):
-    assert not mazdacan.fsc_cam_lkas_allows_steer({"BIT_1": 1, "ERR_BIT_1": 0, "ERR_BIT_2": 0})
+  def test_missing_lnv_does_not_block(self):
+    assert mazdacan.fsc_cam_lkas_allows_steer({"BIT_1": 1, "ERR_BIT_1": 0, "ERR_BIT_2": 0})
 
 
 class TestCreateSteeringControlCoherence:
@@ -99,13 +109,13 @@ class TestCreateSteeringControlCoherence:
     assert int(v["ERR_BIT_1"]) == 0
     assert int(v["CHKSUM"]) == _checksum(4, 90, 0, 0, 0, 1)
 
-  def test_lnv1_copies_fsc_and_zeros_request(self):
+  def test_lnv1_copies_fsc_and_allows_request(self):
     addr, dat, bus = _pack(self.CP, 4, 90, _lkas(lnv=1))
     v = _decode_cam_lkas(dat)
     assert int(v["LINE_NOT_VISIBLE"]) == 1
-    assert int(v["LKAS_REQUEST"]) == 0
+    assert int(v["LKAS_REQUEST"]) == 90
     assert int(v["CTR"]) == 4
-    assert int(v["CHKSUM"]) == _checksum(4, 0, 1, 0, 0, 1)
+    assert int(v["CHKSUM"]) == _checksum(4, 90, 1, 0, 0, 1)
 
   def test_err_bit_zeros_request_and_copies_err(self):
     v = _decode_cam_lkas(_pack(self.CP, 6, 114, _lkas(lnv=1, err1=1, err2=1))[1])
@@ -114,20 +124,20 @@ class TestCreateSteeringControlCoherence:
     assert int(v["ERR_BIT_2"]) == 1
     assert int(v["LKAS_REQUEST"]) == 0
 
-  def test_lnv_1_to_0_resumes_request(self):
-    blocked = _decode_cam_lkas(_pack(self.CP, 1, 50, _lkas(lnv=1))[1])
-    allowed = _decode_cam_lkas(_pack(self.CP, 2, 50, _lkas(lnv=0))[1])
-    assert int(blocked["LKAS_REQUEST"]) == 0
-    assert int(blocked["LINE_NOT_VISIBLE"]) == 1
-    assert int(allowed["LKAS_REQUEST"]) == 50
-    assert int(allowed["LINE_NOT_VISIBLE"]) == 0
+  def test_lnv_1_to_0_keeps_request(self):
+    lnv1 = _decode_cam_lkas(_pack(self.CP, 1, 50, _lkas(lnv=1))[1])
+    lnv0 = _decode_cam_lkas(_pack(self.CP, 2, 50, _lkas(lnv=0))[1])
+    assert int(lnv1["LKAS_REQUEST"]) == 50
+    assert int(lnv1["LINE_NOT_VISIBLE"]) == 1
+    assert int(lnv0["LKAS_REQUEST"]) == 50
+    assert int(lnv0["LINE_NOT_VISIBLE"]) == 0
 
-  def test_lnv_0_to_1_stops_request(self):
-    allowed = _decode_cam_lkas(_pack(self.CP, 1, 50, _lkas(lnv=0))[1])
-    blocked = _decode_cam_lkas(_pack(self.CP, 2, 50, _lkas(lnv=1))[1])
-    assert int(allowed["LKAS_REQUEST"]) == 50
-    assert int(blocked["LKAS_REQUEST"]) == 0
-    assert int(blocked["LINE_NOT_VISIBLE"]) == 1
+  def test_lnv_0_to_1_keeps_request_and_copies_lnv(self):
+    lnv0 = _decode_cam_lkas(_pack(self.CP, 1, 50, _lkas(lnv=0))[1])
+    lnv1 = _decode_cam_lkas(_pack(self.CP, 2, 50, _lkas(lnv=1))[1])
+    assert int(lnv0["LKAS_REQUEST"]) == 50
+    assert int(lnv1["LKAS_REQUEST"]) == 50
+    assert int(lnv1["LINE_NOT_VISIBLE"]) == 1
 
   def test_counter_still_frame_mod_16(self):
     for frame in range(40):
@@ -135,7 +145,7 @@ class TestCreateSteeringControlCoherence:
       assert int(v["CTR"]) == frame % 16
 
   def test_checksum_tracks_lnv_and_torque(self):
-    for lnv, torque, expect_torque in ((0, 12, 12), (1, 12, 0), (0, 0, 0)):
+    for lnv, torque, expect_torque in ((0, 12, 12), (1, 12, 12), (0, 0, 0)):
       v = _decode_cam_lkas(_pack(self.CP, 9, torque, _lkas(lnv=lnv))[1])
       assert int(v["LKAS_REQUEST"]) == expect_torque
       assert int(v["CHKSUM"]) == _checksum(9, expect_torque, lnv, 0, 0, 1)
@@ -150,14 +160,14 @@ class TestRoutePrefaultFrames:
     self.cp.update([(0, [(0x243, dat, 0)])])
     return dict(self.cp.vl["CAM_LKAS"])
 
-  def test_route36_prefault_fsc_lnv1_old_mismatch_removed(self):
+  def test_route36_prefault_copies_lnv1_and_may_request(self):
     fsc = self._fsc(ROUTE36_FSC_PREFAULT)
     assert int(fsc["LINE_NOT_VISIBLE"]) == 1
     assert int(fsc["LKAS_REQUEST"]) == 0
     assert int(fsc["ERR_BIT_1"]) == 0
     packed = _decode_cam_lkas(_pack(self.CP, 13, 90, fsc)[1])
     assert int(packed["LINE_NOT_VISIBLE"]) == 1
-    assert int(packed["LKAS_REQUEST"]) == 0
+    assert int(packed["LKAS_REQUEST"]) == 90
     assert int(packed["ERR_BIT_1"]) == 0
 
   def test_route36_fault_frame_does_not_request_steer(self):
@@ -168,22 +178,31 @@ class TestRoutePrefaultFrames:
     assert int(packed["ERR_BIT_1"]) == 1
     assert int(packed["LKAS_REQUEST"]) == 0
 
+  def test_public_fsc_lnv1_nonzero_is_valid_encoding(self):
+    fsc = self._fsc(PUBLIC_FSC_LNV1_NZ)
+    assert int(fsc["LINE_NOT_VISIBLE"]) == 1
+    assert int(fsc["LKAS_REQUEST"]) == -91
+    assert int(fsc["ERR_BIT_1"]) == 0
+    packed = _decode_cam_lkas(_pack(self.CP, 1, -91, fsc)[1])
+    assert int(packed["LINE_NOT_VISIBLE"]) == 1
+    assert int(packed["LKAS_REQUEST"]) == -91
 
-class TestCarControllerLnvGate:
+
+class TestCarControllerLnvCoherence:
   def setup_method(self):
     self.CP, self.CP_SP = _cp()
     self.CI = CarInterface(self.CP, self.CP_SP)
     self.packer = CANPacker("mazda_2017")
     self.t = 0
 
-  def _step_fsc(self, *, lnv, err1=0, torque=0.2):
+  def _step_fsc(self, *, lnv, err1=0, torque=0.2, lat_active=True):
     self.t += 10_000_000
     packed = mazdacan.create_steering_control(self.packer, self.CP, 0, 0,
                                               _lkas(lnv=lnv, err1=err1, err2=err1))
-    cam = (packed[0], packed[1], 2)
+    cam = CanData(packed[0], packed[1], 2)
     self.CI.update([(self.t, [cam])])
     CC = structs.CarControl()
-    CC.latActive = True
+    CC.latActive = lat_active
     CC.actuators.torque = torque
     CC_SP = structs.CarControlSP()
     actuators, sends = self.CI.apply(CC.as_reader(), CC_SP, self.t)
@@ -196,13 +215,39 @@ class TestCarControllerLnvGate:
     assert abs(int(v["LKAS_REQUEST"])) > 0
     assert abs(actuators.torqueOutputCan) > 0
 
-  def test_controller_lnv1_keeps_mads_path_but_zeros_wire(self):
+  def test_controller_lnv1_copies_lnv_and_may_request_steer(self):
     actuators, v = self._step_fsc(lnv=1)
     assert int(v["LINE_NOT_VISIBLE"]) == 1
-    assert int(v["LKAS_REQUEST"]) == 0
-    assert actuators.torqueOutputCan == 0
+    assert abs(int(v["LKAS_REQUEST"])) > 0
+    assert abs(actuators.torqueOutputCan) > 0
 
   def test_controller_err_bit_zeros_wire(self):
     _, v = self._step_fsc(lnv=0, err1=1)
     assert int(v["ERR_BIT_1"]) == 1
+    assert int(v["LINE_NOT_VISIBLE"]) == 0
     assert int(v["LKAS_REQUEST"]) == 0
+
+  def test_controller_err_bit_lnv1_zeros_wire(self):
+    _, v = self._step_fsc(lnv=1, err1=1)
+    assert int(v["ERR_BIT_1"]) == 1
+    assert int(v["LINE_NOT_VISIBLE"]) == 1
+    assert int(v["LKAS_REQUEST"]) == 0
+
+  def test_controller_lat_inactive_zeros_request_and_copies_lnv(self):
+    _, v = self._step_fsc(lnv=1, lat_active=False)
+    assert int(v["LINE_NOT_VISIBLE"]) == 1
+    assert int(v["LKAS_REQUEST"]) == 0
+
+  def test_cam_lkas_truth_table_fuzz(self):
+    rng = random.Random(36)
+    for _ in range(80):
+      lnv = rng.choice((0, 1))
+      err = rng.choice((0, 1))
+      lat = rng.choice((True, False))
+      torque = rng.choice((0.0, 0.2, -0.2, 1.0))
+      _, v = self._step_fsc(lnv=lnv, err1=err, torque=torque, lat_active=lat)
+      assert int(v["LINE_NOT_VISIBLE"]) == lnv
+      if err or not lat or torque == 0.0:
+        assert int(v["LKAS_REQUEST"]) == 0
+      else:
+        assert abs(int(v["LKAS_REQUEST"])) > 0

@@ -46,6 +46,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     else:
       steer_max = self.params.STEER_MAX
 
+    # latActive is MADS/openpilot lateral + panda authorization. FSC ERR bits
+    # zero the request; FSC LINE_NOT_VISIBLE is copied in CAM_LKAS and must not
+    # suppress openpilot steering by itself.
     if CC.latActive and mazdacan.fsc_cam_lkas_allows_steer(CS.cam_lkas):
       # calculate steer and also set limits due to driver torque
       new_torque = int(round(CC.actuators.torque * steer_max))
