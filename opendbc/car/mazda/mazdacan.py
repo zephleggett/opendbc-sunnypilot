@@ -5,9 +5,10 @@ from opendbc.car.mazda.values import Buttons, MazdaFlags
 
 # Route 3C OEM FSC bus2 (ff7df7d6f9c3403b|0000003c--c56c36c84d).
 # Activation 2→3→4 is one 0x440 frame, 49.8 ms, CAM_LKAS LNV=0 and request=0.
-# Sustained active is TJA=4 / CAM_LKAS LNV=0 / LANE_LINES=2 (2500/2500 TJA=4).
-# TJA=3 afterwards is a drop (4→3→4, 3.2–6.2 s), not the active command state.
-# Do not stay on TJA=3 because FSC LINE_NOT_VISIBLE remains 1.
+# Sustained active is TJA=4 / CAM_LKAS LNV=0. Route 3C also showed LANE_LINES=2
+# while OEM-active, but that is HUD correlation only (Route 36 steered with LL=1).
+# Copy FSC LANE_LINES; do not fabricate lane graphics. TJA=3 afterwards is a drop
+# (4→3→4, 3.2–6.2 s), not the active command state.
 TJA3_ACTIVATION_HOLD_NS = 50_000_000
 FSC_LNV1_LKAS_REQUEST_MAX = 200
 
@@ -148,11 +149,12 @@ def lkas_tx_step(*, lat_active: bool, fsc_ok: bool, now_ns: int,
 
   start_ns = now_ns if handshake_start_ns is None else handshake_start_ns
   if now_ns - start_ns < TJA3_ACTIVATION_HOLD_NS:
-    # Route 3C 2→3: TJA=3, LANE_LINES=2, 0x440 VIS=1 LNV=0, CAM_LKAS LNV=0, request=0.
-    return LkasTx(LKAS_TX_TRANSITION_TO_ACTIVE, 0, 0, 3, 2, 1, 0, 0, start_ns, True)
-  # Sustained OEM active: TJA=4, LANE_LINES=2, 0x440 VIS=0 LNV=1, CAM_LKAS LNV=0.
-  # Independent of FSC painted-lane / CAM_LKAS LINE_NOT_VISIBLE.
-  return LkasTx(LKAS_TX_ACTIVE, int(desired_torque), 0, 4, 2, 0, 1, 0, start_ns, True)
+    # Route 3C 2→3: TJA=3, 0x440 VIS=1 LNV=0, CAM_LKAS LNV=0, request=0.
+    # LANE_LINES is HUD-only: copy FSC, never force 2.
+    return LkasTx(LKAS_TX_TRANSITION_TO_ACTIVE, 0, 0, 3, fsc_ll, 1, 0, 0, start_ns, True)
+  # Sustained OEM active: TJA=4, 0x440 VIS=0 LNV=1, CAM_LKAS LNV=0.
+  # Independent of FSC painted-lane / CAM_LKAS LINE_NOT_VISIBLE / LANE_LINES.
+  return LkasTx(LKAS_TX_ACTIVE, int(desired_torque), 0, 4, fsc_ll, 0, 1, 0, start_ns, True)
 
 
 def create_steering_control(packer, CP, frame, apply_torque, lkas, tx_lnv: int | None = None):
