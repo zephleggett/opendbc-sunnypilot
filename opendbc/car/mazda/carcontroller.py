@@ -54,6 +54,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       new_torque = int(round(CC.actuators.torque * steer_max))
       apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
                                                       CS.out.steeringTorque, self.params, steer_max)
+      apply_torque = mazdacan.clip_lkas_request_to_fsc_envelope(apply_torque, CS.cam_lkas)
 
     virtual_resume_sent = False
     if CC.cruiseControl.cancel:
@@ -81,13 +82,15 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     if self.CP.openpilotLongitudinalControl:
       can_sends.extend(self.update_longitudinal(CC, CC_SP, CS, virtual_resume_sent))
 
-    # send HUD alerts
-    if self.frame % 50 == 0:
+    # send HUD alerts. OEM CAM_LANEINFO is ~2 Hz when idle; while requesting,
+    # send every frame so 0x440 TJA cannot sit at 0 against a live CAM_LKAS.
+    if self.frame % 50 == 0 or apply_torque != 0:
       ldw = CC.hudControl.visualAlert == VisualAlert.ldw
       steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
       # TODO: find a way to silence audible warnings so we can add more hud alerts
       steer_required = steer_required and CS.lkas_allowed_speed
-      can_sends.append(mazdacan.create_alert_command(self.packer, CS.cam_laneinfo, ldw, steer_required))
+      can_sends.append(mazdacan.create_alert_command(self.packer, CS.cam_laneinfo, ldw, steer_required,
+                                                     apply_torque=apply_torque, cam_lkas=CS.cam_lkas))
 
     # send steering command
     can_sends.append(mazdacan.create_steering_control(self.packer, self.CP,

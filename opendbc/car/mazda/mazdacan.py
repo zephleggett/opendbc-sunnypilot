@@ -1,6 +1,11 @@
 from opendbc.car.can_definitions import CanData
 from opendbc.car.mazda.values import Buttons, MazdaFlags
 
+# Route 3C OEM FSC bus2 (ff7df7d6f9c3403b|0000003c--c56c36c84d): LNV=1 + nonzero
+# LKAS_REQUEST max=177, p99=133. Route 39 faulted at LNV=1 + 1088. This is a
+# magnitude envelope, not a permission gate — LNV=1 still allows steering.
+FSC_LNV1_LKAS_REQUEST_MAX = 200
+
 # Radar frames the body ECU expects to keep receiving for stop-and-go to work. Byte-exact
 # captures from a 0x764 radar with no objects in view; only the counter nibble in the last
 # byte changes. 0x364 optionally carries a synthetic stopped lead so standstill holds work
@@ -89,6 +94,28 @@ def fsc_cam_lkas_allows_steer(lkas) -> bool:
   return int(lkas.get("ERR_BIT_1", 0)) == 0 and int(lkas.get("ERR_BIT_2", 0)) == 0
 
 
+def clip_lkas_request_to_fsc_envelope(apply_torque: int, lkas) -> int:
+  # Do not zero LNV=1. Cap only the magnitude to the OEM LNV=1 envelope.
+  if int(lkas.get("LINE_NOT_VISIBLE", 1)) == 1 and abs(apply_torque) > FSC_LNV1_LKAS_REQUEST_MAX:
+    return FSC_LNV1_LKAS_REQUEST_MAX if apply_torque > 0 else -FSC_LNV1_LKAS_REQUEST_MAX
+  return int(apply_torque)
+
+
+def hud_tja_for_request(cam_laneinfo: dict, cam_lkas: dict | None, apply_torque: int) -> int:
+  # Route 3C OEM: TJA=0 never has nonzero CAM_LKAS (340/340 request=0).
+  # TJA=4 is the sustained-active HUD/state with LNV=0 (99.5% nonzero).
+  # TJA=3 is the LNV=1 drop/transition with brief nonzero request.
+  # Parked isolated TJA=4 without a matching CAM_LKAS request faulted — never
+  # send TJA=4 unless we are actually requesting with LNV=0.
+  tja = int(cam_laneinfo.get("TJA", 0))
+  if abs(apply_torque) < 1:
+    return tja
+  lnv = int((cam_lkas or {}).get("LINE_NOT_VISIBLE", cam_laneinfo.get("LINE_NOT_VISIBLE", 1)))
+  if lnv == 0:
+    return 4
+  return 3
+
+
 def create_steering_control(packer, CP, frame, apply_torque, lkas):
 
   # copy values from camera
@@ -100,6 +127,7 @@ def create_steering_control(packer, CP, frame, apply_torque, lkas):
 
   if not fsc_cam_lkas_allows_steer(lkas):
     apply_torque = 0
+  apply_torque = clip_lkas_request_to_fsc_envelope(apply_torque, lkas)
 
   tmp = apply_torque + 2048
 
@@ -153,7 +181,8 @@ def create_steering_control(packer, CP, frame, apply_torque, lkas):
   return packer.make_can_msg("CAM_LKAS", 0, values)
 
 
-def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool):
+def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
+                         apply_torque: int = 0, cam_lkas: dict | None = None):
   values = {s: cam_msg[s] for s in [
     "LINE_VISIBLE",
     "LINE_NOT_VISIBLE",
@@ -166,6 +195,10 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool)
     "S1_HBEAM",
   ]}
   values.update({
+    # Copy FSC TJA. Packer default 0 is OEM OFF; Route 39 TX'd TJA=0 while
+    # commanding CAM_LKAS, a combination that never occurs on golden OEM 3C.
+    "TJA": hud_tja_for_request(cam_msg, cam_lkas, apply_torque),
+    "TJA_TRANSITION": int(cam_msg.get("TJA_TRANSITION", 0)),
     # TODO: what's the difference between all these? do we need to send all?
     "HANDS_WARN_3_BITS": 0b111 if steer_required else 0,
     "HANDS_ON_STEER_WARN": steer_required,
