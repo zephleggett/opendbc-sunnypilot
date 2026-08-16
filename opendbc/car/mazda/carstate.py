@@ -229,6 +229,10 @@ class CarState(CarStateBase, CarStateExt):
     cam_messages = [
       # read through vl_all, which unlike vl has no lazy registration
       ("CAM_LANEINFO", 0),
+      # FSC CAM_LKAS must be subscribed, not lazy-registered after the first
+      # parse, so LINE_NOT_VISIBLE / ERR_BIT_* are available the same frame
+      # CarController decides whether a steer request is coherent.
+      ("CAM_LKAS", float("nan")),
       # Present on some Mazda cameras only. The 2020 CX-9 model-test route has
       # zero 0x35f frames; a freq-0 liveness check makes canValid false for the
       # entire route (5745 invalid iterations). Not used by TJA/MADS/MRCC.

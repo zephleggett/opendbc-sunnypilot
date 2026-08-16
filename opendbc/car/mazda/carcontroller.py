@@ -46,7 +46,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     else:
       steer_max = self.params.STEER_MAX
 
-    if CC.latActive:
+    if CC.latActive and mazdacan.fsc_cam_lkas_allows_steer(CS.cam_lkas):
       # calculate steer and also set limits due to driver torque
       new_torque = int(round(CC.actuators.torque * steer_max))
       apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
