@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""CAM_LKAS LINE_NOT_VISIBLE must stay coherent with FSC.
+"""CAM_LKAS packing and CarController handshake.
 
-Comma used to hard-force LINE_NOT_VISIBLE=0 while requesting torque. On the
-CX-5 2025 routes that latched an LKAS fault, that LNV mismatch (FSC=1,
-comma=0) was the bad field. Production copies FSC LNV.
-
-LINE_NOT_VISIBLE is not a steering-permission gate. Public FSC bus2
-60ed2cf2b490292c|2023-11-21--17-47-15 sent LNV=1 with nonzero LKAS_REQUEST
-(checksum-valid). FSC ERR_BIT_1/2 still zeros the request. Panda/MADS
-authorization is CC.latActive, not LNV.
+Packer default (no tx_lnv) still copies FSC LINE_NOT_VISIBLE. Once latActive
+has completed the Route 3C 50 ms TJA=3 hold, the controller transmits the OEM
+active command state: CAM_LKAS LNV=0, independent of FSC painted-lane bits.
+FSC ERR_BIT_1/2 still zeros the request. Panda/MADS auth is CC.latActive.
 """
 
 import random
@@ -195,17 +191,24 @@ class TestCarControllerLnvCoherence:
     self.packer = CANPacker("mazda_2017")
     self.t = 0
 
-  def _step_fsc(self, *, lnv, err1=0, torque=0.2, lat_active=True):
-    self.t += 10_000_000
+  def _step_fsc(self, *, lnv, err1=0, torque=0.2, lat_active=True, settle_handshake=True):
     packed = mazdacan.create_steering_control(self.packer, self.CP, 0, 0,
                                               _lkas(lnv=lnv, err1=err1, err2=err1))
     cam = CanData(packed[0], packed[1], 2)
-    self.CI.update([(self.t, [cam])])
     CC = structs.CarControl()
     CC.latActive = lat_active
     CC.actuators.torque = torque
     CC_SP = structs.CarControlSP()
-    actuators, sends = self.CI.apply(CC.as_reader(), CC_SP, self.t)
+
+    def _apply():
+      self.t += 10_000_000
+      self.CI.update([(self.t, [cam])])
+      return self.CI.apply(CC.as_reader(), CC_SP, self.t)
+
+    actuators, sends = _apply()
+    if lat_active and err1 == 0 and settle_handshake:
+      self.t += mazdacan.TJA3_ACTIVATION_HOLD_NS
+      actuators, sends = _apply()
     lkas = next(s for s in sends if s[0] == 0x243)
     return actuators, _decode_cam_lkas(lkas[1])
 
@@ -215,11 +218,16 @@ class TestCarControllerLnvCoherence:
     assert abs(int(v["LKAS_REQUEST"])) > 0
     assert abs(actuators.torqueOutputCan) > 0
 
-  def test_controller_lnv1_copies_lnv_and_may_request_steer(self):
+  def test_controller_lnv1_enters_active_command_lnv0(self):
     actuators, v = self._step_fsc(lnv=1)
-    assert int(v["LINE_NOT_VISIBLE"]) == 1
+    assert int(v["LINE_NOT_VISIBLE"]) == 0
     assert abs(int(v["LKAS_REQUEST"])) > 0
     assert abs(actuators.torqueOutputCan) > 0
+
+  def test_controller_handshake_zeros_request_for_50ms(self):
+    _, v = self._step_fsc(lnv=1, settle_handshake=False)
+    assert int(v["LINE_NOT_VISIBLE"]) == 0
+    assert int(v["LKAS_REQUEST"]) == 0
 
   def test_controller_err_bit_zeros_wire(self):
     _, v = self._step_fsc(lnv=0, err1=1)
@@ -246,7 +254,10 @@ class TestCarControllerLnvCoherence:
       lat = rng.choice((True, False))
       torque = rng.choice((0.0, 0.2, -0.2, 1.0))
       _, v = self._step_fsc(lnv=lnv, err1=err, torque=torque, lat_active=lat)
-      assert int(v["LINE_NOT_VISIBLE"]) == lnv
+      if lat and not err:
+        assert int(v["LINE_NOT_VISIBLE"]) == 0
+      else:
+        assert int(v["LINE_NOT_VISIBLE"]) == lnv
       if err or not lat or torque == 0.0:
         assert int(v["LKAS_REQUEST"]) == 0
       else:

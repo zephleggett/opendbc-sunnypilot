@@ -33,11 +33,11 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.radar_counter = 0
     self.radar_session = RadarSessionManager()
     self.accel_last = 0.
+    self.lkas_handshake_start_ns = None
+    self.lkas_tx_state = mazdacan.LKAS_TX_IDLE
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
-
-    apply_torque = 0
 
     # Speed-dependent STEER_MAX (CX-5 2022: 1200 below 32 mph, 800 above)
     if hasattr(self.params, 'STEER_MAX_LOOKUP'):
@@ -46,15 +46,29 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     else:
       steer_max = self.params.STEER_MAX
 
-    # latActive is MADS/openpilot lateral + panda authorization. FSC ERR bits
-    # zero the request; FSC LINE_NOT_VISIBLE is copied in CAM_LKAS and must not
-    # suppress openpilot steering by itself.
-    if CC.latActive and mazdacan.fsc_cam_lkas_allows_steer(CS.cam_lkas):
-      # calculate steer and also set limits due to driver torque
+    # latActive is MADS/openpilot lateral AND panda authorization (controlsd).
+    # FSC ERR bits force FAULT (request 0). FSC LINE_NOT_VISIBLE is not a gate:
+    # after the Route 3C 50 ms TJA=3 handshake, TX uses the OEM active envelope.
+    desired_torque = 0
+    fsc_ok = mazdacan.fsc_cam_lkas_allows_steer(CS.cam_lkas)
+    if CC.latActive and fsc_ok:
       new_torque = int(round(CC.actuators.torque * steer_max))
-      apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
-                                                      CS.out.steeringTorque, self.params, steer_max)
-      apply_torque = mazdacan.clip_lkas_request_to_fsc_envelope(apply_torque, CS.cam_lkas)
+      desired_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
+                                                        CS.out.steeringTorque, self.params, steer_max)
+
+    tx = mazdacan.lkas_tx_step(
+      lat_active=bool(CC.latActive),
+      fsc_ok=fsc_ok,
+      now_ns=int(now_nanos),
+      handshake_start_ns=self.lkas_handshake_start_ns,
+      prev_state=self.lkas_tx_state,
+      desired_torque=desired_torque,
+      fsc_lkas=CS.cam_lkas,
+      fsc_lane=CS.cam_laneinfo,
+    )
+    self.lkas_handshake_start_ns = tx.handshake_start_ns
+    self.lkas_tx_state = tx.state
+    apply_torque = tx.apply_torque
 
     virtual_resume_sent = False
     if CC.cruiseControl.cancel:
@@ -82,19 +96,21 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     if self.CP.openpilotLongitudinalControl:
       can_sends.extend(self.update_longitudinal(CC, CC_SP, CS, virtual_resume_sent))
 
-    # send HUD alerts. OEM CAM_LANEINFO is ~2 Hz when idle; while requesting,
-    # send every frame so 0x440 TJA cannot sit at 0 against a live CAM_LKAS.
-    if self.frame % 50 == 0 or apply_torque != 0:
+    # send HUD alerts. OEM CAM_LANEINFO is ~2 Hz when idle. During the TJA=3
+    # handshake and TJA=4 active envelope, send every frame so 0x440 cannot sit
+    # at a stale TJA against live CAM_LKAS.
+    if self.frame % 50 == 0 or tx.send_hud_every_frame:
       ldw = CC.hudControl.visualAlert == VisualAlert.ldw
       steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
       # TODO: find a way to silence audible warnings so we can add more hud alerts
       steer_required = steer_required and CS.lkas_allowed_speed
       can_sends.append(mazdacan.create_alert_command(self.packer, CS.cam_laneinfo, ldw, steer_required,
-                                                     apply_torque=apply_torque, cam_lkas=CS.cam_lkas))
+                                                     apply_torque=apply_torque, cam_lkas=CS.cam_lkas, tx=tx))
 
     # send steering command
     can_sends.append(mazdacan.create_steering_control(self.packer, self.CP,
-                                                      self.frame, apply_torque, CS.cam_lkas))
+                                                      self.frame, apply_torque, CS.cam_lkas,
+                                                      tx_lnv=tx.cam_lkas_lnv))
 
     # Intelligent Cruise Button Management
     # Suppress ICBM CRZ_BTNS spam while cancel/resume are in flight or while the driver is
