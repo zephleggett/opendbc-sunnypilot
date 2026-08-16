@@ -200,12 +200,10 @@ class CarState(CarStateBase, CarStateExt):
     self.cancel_button = cp.vl["CRZ_BTNS"]["CAN_OFF"]
     self.resume_button = cp.vl["CRZ_BTNS"]["RES"]
     self.main_button = int(cp.vl["CRZ_BTNS"]["MODE_X"] == 1 and cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
-    # Physical TJA is the only MADS toggle (ButtonType.lkas). MRCC stays OEM:
-    # it is not decoded into buttonEvents and must not share a mainCruise master.
-    if self.CP.openpilotLongitudinalControl:
-      self.tja_button = int(cp.vl["CRZ_BTNS"]["TJA_BUTTON"] == 1)
-    else:
-      self.tja_button = 0
+    # Physical TJA is the only MADS toggle (ButtonType.lkas) on both stock and
+    # openpilot longitudinal. MRCC stays OEM: it is not decoded into buttonEvents
+    # and must not share a mainCruise master.
+    self.tja_button = int(cp.vl["CRZ_BTNS"]["TJA_BUTTON"] == 1)
 
     ret.buttonEvents = [
       *create_button_events(self.distance_button, prev_distance_button, {1: ButtonType.gapAdjustCruise}),
