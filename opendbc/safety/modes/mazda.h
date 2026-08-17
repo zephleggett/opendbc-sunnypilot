@@ -95,18 +95,25 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
       update_sample(&torque_driver, torque_driver_new);
     }
 
-    // enter controls on rising edge of ACC, exit controls on ACC off
+    // Longitudinal PCM: enter/exit controls_allowed on OEM MRCC engaged (CRZ_ACTIVE).
+    // Do not map CRZ_AVAILABLE / PEDALS ACC_OFF onto acc_main_on. Mazda MADS lateral
+    // authorization is TJA-only; feeding MRCC into acc_main would grant lateral without
+    // TJA and revoke it when OEM cruise drops.
     if ((msg->addr == MAZDA_CRZ_CTRL) && !mazda_longitudinal) {
       bool cruise_engaged = msg->data[0] & 0x8U;
       pcm_cruise_check(cruise_engaged);
-      acc_main_on = GET_BIT(msg, 17U);
     }
 
-    if ((msg->addr == MAZDA_CRZ_BTNS) && mazda_longitudinal) {
-      // ensure the driver's cancel press always exits controls
-      bool cancel = GET_BIT(msg, 0U);
-      if (cancel) {
-        controls_allowed = false;
+    // TJA_BUTTON is DBC start bit 11 (1-bit Motorola == Intel bit 11).
+    if (msg->addr == MAZDA_CRZ_BTNS) {
+      mads_button_press = GET_BIT(msg, 11U) ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
+
+      if (mazda_longitudinal) {
+        // ensure the driver's cancel press always exits longitudinal controls
+        bool cancel = GET_BIT(msg, 0U);
+        if (cancel) {
+          controls_allowed = false;
+        }
       }
     }
 
@@ -125,7 +132,6 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
         bool acc_armed = GET_BIT(msg, 2U) || cruise_engaged;
 
         if (acc_armed || cruise_engaged_prev || (!brake && !brake_pressed_prev)) {
-          acc_main_on = acc_armed;
           pcm_cruise_check(cruise_engaged);
         }
       }

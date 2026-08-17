@@ -70,6 +70,14 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     }
     return self.packer.make_can_msg_safety("CRZ_BTNS", 0, values)
 
+  def _lkas_button_msg(self, enabled):
+    values = {"TJA_BUTTON": int(enabled), "BIT1": 1, "BIT2": 1, "BIT3": 1}
+    return self.packer.make_can_msg_safety("CRZ_BTNS", 0, values)
+
+  def _mrcc_armed_msg(self, armed):
+    values = {"CRZ_AVAILABLE": int(armed)}
+    return self.packer.make_can_msg_safety("CRZ_CTRL", 0, values)
+
   def test_buttons(self):
     # only cancel allows while controls not allowed
     self.safety.set_controls_allowed(0)
@@ -80,6 +88,72 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.safety.set_controls_allowed(1)
     self.assertTrue(self._tx(self._button_msg(cancel=True)))
     self.assertTrue(self._tx(self._button_msg(resume=True)))
+
+  def test_tja_button_sets_mads_press_state(self):
+    self.safety.set_mads_params(True, False, False)
+
+    self._rx(self._lkas_button_msg(False))
+    self.assertEqual(0, self.safety.get_mads_button_press())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    self._rx(self._lkas_button_msg(True))
+    self.assertEqual(1, self.safety.get_mads_button_press())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    self._rx(self._lkas_button_msg(True))
+    self._rx(self._lkas_button_msg(True))
+    self.assertEqual(1, self.safety.get_mads_button_press())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    self._rx(self._lkas_button_msg(False))
+    self.assertEqual(0, self.safety.get_mads_button_press())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_tja_grants_lateral_while_mrcc_already_armed(self):
+    self.safety.set_mads_params(True, False, False)
+
+    self._rx(self._mrcc_armed_msg(True))
+    self.assertFalse(self.safety.get_acc_main_on())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    self._rx(self._lkas_button_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_tja_grants_lateral_with_acc_main_already_high(self):
+    # MRCC/acc_main already high, MADS lateral off: TJA must still authorize
+    # without a new acc_main rising edge.
+    self.safety.set_mads_params(True, False, False)
+    self.safety.set_acc_main_on(True)
+    self._rx(self._speed_msg(0))
+    self.safety.set_controls_allowed_lateral(False)
+    self.safety.set_controls_requested_lateral(False)
+    self._rx(self._speed_msg(0))
+    self.assertTrue(self.safety.get_acc_main_on())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    self._rx(self._lkas_button_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_mrcc_falling_does_not_exit_mads_lateral(self):
+    self.safety.set_mads_params(True, False, False)
+    self._rx(self._lkas_button_msg(True))
+    self._rx(self._lkas_button_msg(False))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    self._rx(self._mrcc_armed_msg(True))
+    self._rx(self._mrcc_armed_msg(False))
+    self.assertFalse(self.safety.get_acc_main_on())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_set_res_cancel_do_not_grant_mads_lateral(self):
+    self.safety.set_mads_params(True, False, False)
+    self._rx(self._button_msg(resume=True))
+    self.assertEqual(0, self.safety.get_mads_button_press())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    self._rx(self._button_msg(cancel=True))
+    self.assertEqual(0, self.safety.get_mads_button_press())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
 
 
 class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafetyTest):
@@ -96,6 +170,10 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
 
   def _pcm_status_msg(self, enable):
     values = {"ACC_ACTIVE": enable, "BRAKE_ON": 0}
+    return self.packer.make_can_msg_safety("PEDALS", 0, values)
+
+  def _mrcc_armed_msg(self, armed):
+    values = {"ACC_OFF": int(armed), "ACC_ACTIVE": 0, "BRAKE_ON": 0}
     return self.packer.make_can_msg_safety("PEDALS", 0, values)
 
   def _accel_msg(self, accel: float, bus: int = 0):
