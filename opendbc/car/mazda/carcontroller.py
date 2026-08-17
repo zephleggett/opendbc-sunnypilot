@@ -47,8 +47,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       steer_max = self.params.STEER_MAX
 
     # latActive is MADS/openpilot lateral AND panda authorization (controlsd).
-    # FSC ERR bits force FAULT (request 0). FSC LINE_NOT_VISIBLE is not a gate:
-    # after the Route 3C 50 ms TJA=3 handshake, TX uses the OEM active envelope.
+    # FSC ERR bits force FAULT (request 0). FSC LINE_NOT_VISIBLE is not a gate.
+    # Internal ~50 ms CAM_LKAS settle zeros request; 0x440 stays an FSC copy.
     desired_torque = 0
     fsc_ok = mazdacan.fsc_cam_lkas_allows_steer(CS.cam_lkas)
     if CC.latActive and fsc_ok:
@@ -96,10 +96,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     if self.CP.openpilotLongitudinalControl:
       can_sends.extend(self.update_longitudinal(CC, CC_SP, CS, virtual_resume_sent))
 
-    # send HUD alerts. OEM CAM_LANEINFO is ~2 Hz when idle. During the TJA=3
-    # handshake and TJA=4 active envelope, send every frame so 0x440 cannot sit
-    # at a stale TJA against live CAM_LKAS.
-    if self.frame % 50 == 0 or tx.send_hud_every_frame:
+    # HUD: forward FSC CAM_LANEINFO at the stock ~2 Hz cadence (frame%50 @ 100 Hz).
+    # Route 3F: do not accelerate 0x440 while MADS is active.
+    if self.frame % 50 == 0:
       ldw = CC.hudControl.visualAlert == VisualAlert.ldw
       steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
       # TODO: find a way to silence audible warnings so we can add more hud alerts

@@ -3,13 +3,12 @@ from dataclasses import dataclass
 from opendbc.car.can_definitions import CanData
 from opendbc.car.mazda.values import Buttons, MazdaFlags
 
-# Route 3C OEM FSC bus2 (ff7df7d6f9c3403b|0000003c--c56c36c84d).
-# Activation 2→3→4 is one 0x440 frame, 49.8 ms, CAM_LKAS LNV=0 and request=0.
-# Sustained active is TJA=4 / CAM_LKAS LNV=0. Route 3C also showed LANE_LINES=2
-# while OEM-active, but that is HUD correlation only (Route 36 steered with LL=1).
-# Copy FSC LANE_LINES; do not fabricate lane graphics. TJA=3 afterwards is a drop
-# (4→3→4, 3.2–6.2 s), not the active command state.
-TJA3_ACTIVATION_HOLD_NS = 50_000_000
+# Route 3F (ff7df7d6f9c3403b|0000003f--cc7db91066): MADS/EPS steered for ~90 s, but
+# MADS-forced CAM_LANEINFO TJA=4 + FSC LANE_LINES=1 at ~100 Hz never occurs in OEM
+# Route 3C and coincided with missing icon/lanes and a cluster FSC malfunction.
+# Keep an internal CAM_LKAS settling hold; leave 0x440 ownership with FSC at ~2 Hz.
+STEER_ACTIVATION_HOLD_NS = 50_000_000
+TJA3_ACTIVATION_HOLD_NS = STEER_ACTIVATION_HOLD_NS  # legacy alias for tests
 FSC_LNV1_LKAS_REQUEST_MAX = 200
 
 LKAS_TX_IDLE = "IDLE"
@@ -26,6 +25,7 @@ class LkasTx:
   state: str
   apply_torque: int
   cam_lkas_lnv: int
+  # 0x440 HUD fields are always the live FSC CAM_LANEINFO values (never MADS-forced).
   tja: int
   lane_lines: int
   line_visible: int
@@ -137,24 +137,24 @@ def lkas_tx_step(*, lat_active: bool, fsc_ok: bool, now_ns: int,
   fsc_hud_lnv = int(fsc_lane.get("LINE_NOT_VISIBLE", 1))
   fsc_tr = int(fsc_lane.get("TJA_TRANSITION", 0))
 
-  def _copy_fsc(state: str, start_ns: int | None) -> LkasTx:
-    return LkasTx(state, 0, fsc_cam_lnv, fsc_tja, fsc_ll, fsc_vis, fsc_hud_lnv, fsc_tr,
-                  start_ns, False)
+  def _hud(state: str, apply_torque: int, cam_lnv: int, start_ns: int | None) -> LkasTx:
+    # Always FSC 0x440 semantics. send_hud_every_frame stays False so the
+    # controller keeps the stock ~2 Hz CAM_LANEINFO cadence (Route 3F: 100 Hz hurt).
+    return LkasTx(state, apply_torque, cam_lnv, fsc_tja, fsc_ll, fsc_vis, fsc_hud_lnv,
+                  fsc_tr, start_ns, False)
 
   if not fsc_ok:
-    return _copy_fsc(LKAS_TX_FAULT, None)
+    return _hud(LKAS_TX_FAULT, 0, fsc_cam_lnv, None)
   if not lat_active:
     paused = prev_state in _ACTIVE_PREV
-    return _copy_fsc(LKAS_TX_AUTH_PAUSED if paused else LKAS_TX_IDLE, None)
+    return _hud(LKAS_TX_AUTH_PAUSED if paused else LKAS_TX_IDLE, 0, fsc_cam_lnv, None)
 
   start_ns = now_ns if handshake_start_ns is None else handshake_start_ns
-  if now_ns - start_ns < TJA3_ACTIVATION_HOLD_NS:
-    # Route 3C 2→3: TJA=3, 0x440 VIS=1 LNV=0, CAM_LKAS LNV=0, request=0.
-    # LANE_LINES is HUD-only: copy FSC, never force 2.
-    return LkasTx(LKAS_TX_TRANSITION_TO_ACTIVE, 0, 0, 3, fsc_ll, 1, 0, 0, start_ns, True)
-  # Sustained OEM active: TJA=4, 0x440 VIS=0 LNV=1, CAM_LKAS LNV=0.
-  # Independent of FSC painted-lane / CAM_LKAS LINE_NOT_VISIBLE / LANE_LINES.
-  return LkasTx(LKAS_TX_ACTIVE, int(desired_torque), 0, 4, fsc_ll, 0, 1, 0, start_ns, True)
+  if now_ns - start_ns < STEER_ACTIVATION_HOLD_NS:
+    # Internal CAM_LKAS settle only: request=0, CAM_LKAS LNV=0. Do not touch 0x440.
+    return _hud(LKAS_TX_TRANSITION_TO_ACTIVE, 0, 0, start_ns)
+  # Steering active: CAM_LKAS LNV=0 + request allowed. 0x440 remains FSC copy.
+  return _hud(LKAS_TX_ACTIVE, int(desired_torque), 0, start_ns)
 
 
 def create_steering_control(packer, CP, frame, apply_torque, lkas, tx_lnv: int | None = None):
@@ -225,6 +225,9 @@ def create_steering_control(packer, CP, frame, apply_torque, lkas, tx_lnv: int |
 def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
                          apply_torque: int = 0, cam_lkas: dict | None = None,
                          tx: LkasTx | None = None):
+  # Route 3F: do not let MADS/tx override CAM_LANEINFO. Cluster HUD follows FSC.
+  # `tx` is accepted for API compatibility but ignored for 0x440 state fields.
+  del apply_torque, cam_lkas, tx, ldw
   values = {s: cam_msg[s] for s in [
     "LINE_VISIBLE",
     "LINE_NOT_VISIBLE",
@@ -236,18 +239,9 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
     "S1",
     "S1_HBEAM",
   ]}
-  if tx is None:
-    tja = int(cam_msg.get("TJA", 0))
-    tr = int(cam_msg.get("TJA_TRANSITION", 0))
-  else:
-    values["LINE_VISIBLE"] = tx.line_visible
-    values["LINE_NOT_VISIBLE"] = tx.hud_lnv
-    values["LANE_LINES"] = tx.lane_lines
-    tja = tx.tja
-    tr = tx.tja_transition
   values.update({
-    "TJA": tja,
-    "TJA_TRANSITION": tr,
+    "TJA": int(cam_msg.get("TJA", 0)),
+    "TJA_TRANSITION": int(cam_msg.get("TJA_TRANSITION", 0)),
     # TODO: what's the difference between all these? do we need to send all?
     "HANDS_WARN_3_BITS": 0b111 if steer_required else 0,
     "HANDS_ON_STEER_WARN": steer_required,

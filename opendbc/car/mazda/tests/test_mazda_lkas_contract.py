@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Route 3C OEM active-TJA handshake contract vs failed Routes 34/36/39."""
+"""OEM HUD ownership + MADS CAM_LKAS steering independence.
+
+Route 3F proved MADS/EPS steering works. Forced ACTIVE TJA=4 + LANE_LINES=1 at
+~100 Hz did not. Production copies FSC CAM_LANEINFO intact at ~2 Hz and keeps
+an internal ~50 ms CAM_LKAS request=0 settle before ACTIVE LNV=0 steering.
+"""
 
 from opendbc.can import CANPacker, CANParser
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.mazdacan import (
   FSC_LNV1_LKAS_REQUEST_MAX, LKAS_TX_ACTIVE, LKAS_TX_AUTH_PAUSED, LKAS_TX_FAULT,
-  LKAS_TX_IDLE, LKAS_TX_TRANSITION_TO_ACTIVE, TJA3_ACTIVATION_HOLD_NS,
+  LKAS_TX_IDLE, LKAS_TX_TRANSITION_TO_ACTIVE, STEER_ACTIVATION_HOLD_NS,
+  TJA3_ACTIVATION_HOLD_NS,
 )
 from opendbc.car.mazda.values import CAR, MazdaFlags
 from opendbc.car.structs import CarParams
@@ -56,20 +62,23 @@ def _decode_440(dat):
 
 
 def _step(lat_active, now_ns, start_ns=None, prev=LKAS_TX_IDLE, desired=163,
-          fsc_lnv=1, fsc_tja=0, err1=0, fsc_ll=1):
+          fsc_lnv=1, fsc_tja=0, err1=0, fsc_ll=1, fsc_hud_lnv=1, fsc_vis=0, fsc_tr=0):
   return mazdacan.lkas_tx_step(
     lat_active=lat_active, fsc_ok=err1 == 0, now_ns=now_ns,
     handshake_start_ns=start_ns, prev_state=prev, desired_torque=desired,
-    fsc_lkas=_lkas(lnv=fsc_lnv, err1=err1), fsc_lane=_lane(tja=fsc_tja, ll=fsc_ll, lnv=1),
+    fsc_lkas=_lkas(lnv=fsc_lnv, err1=err1),
+    fsc_lane=_lane(tja=fsc_tja, ll=fsc_ll, lnv=fsc_hud_lnv, vis=fsc_vis, tr=fsc_tr),
   )
 
 
-def _pack(tx, req=None):
+def _pack(tx, fsc_lane=None, req=None):
   packer = CANPacker("mazda_2017")
   torque = tx.apply_torque if req is None else req
+  lane = fsc_lane or _lane(tja=tx.tja, ll=tx.lane_lines, lnv=tx.hud_lnv,
+                           vis=tx.line_visible, tr=tx.tja_transition)
   steer = mazdacan.create_steering_control(packer, _cp(), 3, torque, _lkas(lnv=1),
                                            tx_lnv=tx.cam_lkas_lnv)
-  hud = mazdacan.create_alert_command(packer, _lane(tja=0, ll=1, lnv=1), False, False, tx=tx)
+  hud = mazdacan.create_alert_command(packer, lane, False, False, tx=tx)
   return _decode_243(steer[1]), _decode_440(hud[1])
 
 
@@ -90,93 +99,90 @@ class TestHandshakeStateMachine:
     assert v243["LKAS_REQUEST"] == 0
     assert v440["TJA"] == 0
 
-  def test_auth_enters_tja3_transition(self):
+  def test_auth_enters_internal_settle_not_tja3(self):
     tx = _step(True, 0, start_ns=None, desired=400, fsc_lnv=1, fsc_tja=0)
     assert tx.state == LKAS_TX_TRANSITION_TO_ACTIVE
-    assert tx.tja == 3
+    assert tx.tja == 0  # FSC TJA, not forced 3
     assert tx.cam_lkas_lnv == 0
     assert tx.apply_torque == 0
     assert tx.lane_lines == 1
-    assert tx.line_visible == 1
-    assert tx.hud_lnv == 0
+    assert tx.send_hud_every_frame is False
     v243, v440 = _pack(tx)
     assert v243["LKAS_REQUEST"] == 0
     assert v243["LINE_NOT_VISIBLE"] == 0
-    assert v440["TJA"] == 3
+    assert v440["TJA"] == 0
     assert v440["LANE_LINES"] == 1
 
   def test_transition_lasts_50ms_not_forever(self):
     t0 = 1_000_000_000
-    tx0 = _step(True, t0, None, desired=400, fsc_lnv=1)
-    tx_mid = _step(True, t0 + TJA3_ACTIVATION_HOLD_NS - 1, tx0.handshake_start_ns,
-                   tx0.state, desired=400, fsc_lnv=1)
-    tx_go = _step(True, t0 + TJA3_ACTIVATION_HOLD_NS, tx0.handshake_start_ns,
-                  tx_mid.state, desired=400, fsc_lnv=1)
+    tx0 = _step(True, t0, None, desired=400, fsc_lnv=1, fsc_tja=2)
+    tx_mid = _step(True, t0 + STEER_ACTIVATION_HOLD_NS - 1, tx0.handshake_start_ns,
+                   tx0.state, desired=400, fsc_lnv=1, fsc_tja=2)
+    tx_go = _step(True, t0 + STEER_ACTIVATION_HOLD_NS, tx0.handshake_start_ns,
+                  tx_mid.state, desired=400, fsc_lnv=1, fsc_tja=2)
     assert tx_mid.state == LKAS_TX_TRANSITION_TO_ACTIVE
     assert tx_mid.apply_torque == 0
+    assert tx_mid.tja == 2
     assert tx_go.state == LKAS_TX_ACTIVE
-    assert tx_go.tja == 4
+    assert tx_go.tja == 2  # still FSC, not forced 4
     assert tx_go.cam_lkas_lnv == 0
     assert tx_go.apply_torque == 400
+    assert tx_go.send_hud_every_frame is False
 
-  def test_fsc_lnv1_does_not_hold_tja3(self):
+  def test_fsc_lnv1_does_not_hold_settle(self):
     t0 = 0
     tx = _step(True, t0, None, desired=90, fsc_lnv=1, fsc_tja=0)
     for dt in (50_000_000, 2_000_000_000, 10_000_000_000):
-      tx = _step(True, t0 + dt, tx.handshake_start_ns, tx.state, desired=90, fsc_lnv=1)
+      tx = _step(True, t0 + dt, tx.handshake_start_ns, tx.state, desired=90, fsc_lnv=1, fsc_tja=0)
       assert tx.state == LKAS_TX_ACTIVE
-      assert tx.tja == 4
+      assert tx.tja == 0
       assert tx.cam_lkas_lnv == 0
       assert tx.apply_torque == 90
 
-  def test_active_uses_oem_envelope(self):
-    tx = _step(True, TJA3_ACTIVATION_HOLD_NS, 0, LKAS_TX_TRANSITION_TO_ACTIVE,
-               desired=537, fsc_lnv=1, fsc_tja=0)
+  def test_active_steers_with_fsc_hud(self):
+    tx = _step(True, STEER_ACTIVATION_HOLD_NS, 0, LKAS_TX_TRANSITION_TO_ACTIVE,
+               desired=537, fsc_lnv=1, fsc_tja=0, fsc_ll=1)
     v243, v440 = _pack(tx)
     assert v243["LINE_NOT_VISIBLE"] == 0
     assert v243["LKAS_REQUEST"] == 537
     assert v243["ERR_BIT_1"] == 0
-    assert v243["BIT_1"] == 1
-    assert v243["LDW"] == 0
-    assert v243["ANGLE_ENABLED"] == 0
-    assert v243["STEERING_ANGLE"] == 0
-    assert v440["TJA"] == 4
+    assert v440["TJA"] == 0
     assert v440["LANE_LINES"] == 1
     assert v440["LINE_VISIBLE"] == 0
     assert v440["LINE_NOT_VISIBLE"] == 1
 
   def test_active_does_not_clamp_to_200(self):
-    tx = _step(True, TJA3_ACTIVATION_HOLD_NS, 0, LKAS_TX_TRANSITION_TO_ACTIVE,
+    tx = _step(True, STEER_ACTIVATION_HOLD_NS, 0, LKAS_TX_TRANSITION_TO_ACTIVE,
                desired=1088, fsc_lnv=1)
     v243, _ = _pack(tx)
     assert v243["LKAS_REQUEST"] == 1088
     assert v243["LINE_NOT_VISIBLE"] == 0
 
-  def test_auth_loss_zeros_request_keeps_resume_path(self):
-    active = _step(True, TJA3_ACTIVATION_HOLD_NS, 0, LKAS_TX_TRANSITION_TO_ACTIVE,
+  def test_auth_loss_zeros_request_keeps_fsc_hud(self):
+    active = _step(True, STEER_ACTIVATION_HOLD_NS, 0, LKAS_TX_TRANSITION_TO_ACTIVE,
                    desired=200, fsc_lnv=1)
-    paused = _step(False, TJA3_ACTIVATION_HOLD_NS + 10_000_000, active.handshake_start_ns,
+    paused = _step(False, STEER_ACTIVATION_HOLD_NS + 10_000_000, active.handshake_start_ns,
                    active.state, desired=200, fsc_lnv=1, fsc_tja=2)
     assert paused.state == LKAS_TX_AUTH_PAUSED
     assert paused.apply_torque == 0
     assert paused.tja == 2
     assert paused.handshake_start_ns is None
 
-  def test_auth_restore_reenters_transition_then_active(self):
+  def test_auth_restore_reenters_settle_then_active(self):
     paused = _step(False, 100, None, LKAS_TX_ACTIVE, desired=200, fsc_tja=2)
     t1 = 200
-    tr = _step(True, t1, paused.handshake_start_ns, paused.state, desired=200, fsc_lnv=1)
+    tr = _step(True, t1, paused.handshake_start_ns, paused.state, desired=200, fsc_lnv=1, fsc_tja=2)
     assert tr.state == LKAS_TX_TRANSITION_TO_ACTIVE
     assert tr.apply_torque == 0
-    assert tr.tja == 3
-    act = _step(True, t1 + TJA3_ACTIVATION_HOLD_NS, tr.handshake_start_ns, tr.state,
-                desired=200, fsc_lnv=1)
+    assert tr.tja == 2
+    act = _step(True, t1 + STEER_ACTIVATION_HOLD_NS, tr.handshake_start_ns, tr.state,
+                desired=200, fsc_lnv=1, fsc_tja=2)
     assert act.state == LKAS_TX_ACTIVE
-    assert act.tja == 4
+    assert act.tja == 2
     assert act.apply_torque == 200
 
   def test_err_zeros_request(self):
-    tx = _step(True, TJA3_ACTIVATION_HOLD_NS, 0, LKAS_TX_ACTIVE, desired=400, err1=1)
+    tx = _step(True, STEER_ACTIVATION_HOLD_NS, 0, LKAS_TX_ACTIVE, desired=400, err1=1)
     assert tx.state == LKAS_TX_FAULT
     assert tx.apply_torque == 0
     packer = CANPacker("mazda_2017")
@@ -206,154 +212,182 @@ class TestPackerBackstops:
 class TestRouteReplay:
   """One state machine through Routes 34/36/39. latActive includes panda auth."""
 
-  def _replay(self, t_auth, t_fault, fsc_lnv, desired=90):
+  def _replay(self, t_auth, t_fault, fsc_lnv, desired=90, fsc_tja=0):
     start = None
     prev = LKAS_TX_IDLE
     rows = []
     reached_active = False
-    stayed_tja3 = False
+    stayed_in_settle = False
     pre_auth_nz = False
-    tja0_while_req = False
+    forced_tja_while_mads = False
     t0 = int((t_auth - 0.05) * 1e9)
     t1 = int((t_fault + 0.05) * 1e9)
     for ns in range(t0, t1, 10_000_000):
       t = ns / 1e9
       lat = t >= t_auth
       err = 1 if t >= t_fault else 0
-      tx = _step(lat, ns, start, prev, desired=desired, fsc_lnv=fsc_lnv, fsc_tja=0, err1=err)
+      tx = _step(lat, ns, start, prev, desired=desired, fsc_lnv=fsc_lnv, fsc_tja=fsc_tja, err1=err)
       start, prev = tx.handshake_start_ns, tx.state
       if tx.state == LKAS_TX_ACTIVE:
         reached_active = True
       if t >= t_auth + 0.050 and t < t_fault and tx.state == LKAS_TX_TRANSITION_TO_ACTIVE:
-        stayed_tja3 = True
+        stayed_in_settle = True
       if t < t_auth and tx.apply_torque != 0:
         pre_auth_nz = True
-      if tx.apply_torque != 0 and tx.tja == 0:
-        tja0_while_req = True
+      if lat and err == 0 and tx.tja != fsc_tja:
+        forced_tja_while_mads = True
       rows.append((round(t, 3), tx.state, tx.tja, tx.cam_lkas_lnv, tx.lane_lines,
                    tx.apply_torque, lat, err))
     return {
       "reached_active": reached_active,
-      "stayed_tja3": stayed_tja3,
+      "stayed_in_settle": stayed_in_settle,
       "pre_auth_nz": pre_auth_nz,
-      "tja0_while_req": tja0_while_req,
+      "forced_tja_while_mads": forced_tja_while_mads,
       "rows": rows,
     }
 
   def test_route39(self):
-    r = self._replay(112.021, 117.882, fsc_lnv=1, desired=1088)
+    r = self._replay(112.021, 117.882, fsc_lnv=1, desired=1088, fsc_tja=0)
     assert r["pre_auth_nz"] is False
-    assert r["tja0_while_req"] is False
-    assert r["stayed_tja3"] is False
+    assert r["forced_tja_while_mads"] is False
+    assert r["stayed_in_settle"] is False
     assert r["reached_active"] is True
     active = [row for row in r["rows"] if row[1] == LKAS_TX_ACTIVE]
     assert active
-    assert all(row[2] == 4 and row[3] == 0 and row[4] == 1 for row in active)
+    assert all(row[2] == 0 and row[3] == 0 and row[4] == 1 for row in active)
     trans = [row for row in r["rows"] if row[1] == LKAS_TX_TRANSITION_TO_ACTIVE]
     assert trans
-    assert all(row[2] == 3 and row[5] == 0 for row in trans)
+    assert all(row[2] == 0 and row[5] == 0 for row in trans)
 
   def test_route36(self):
-    r = self._replay(39.039, 62.199, fsc_lnv=1, desired=90)
+    r = self._replay(39.039, 62.199, fsc_lnv=1, desired=90, fsc_tja=0)
     assert r["pre_auth_nz"] is False
-    assert r["stayed_tja3"] is False
+    assert r["stayed_in_settle"] is False
     assert r["reached_active"] is True
-    assert r["tja0_while_req"] is False
-    # Route 36 EPS EFFECTIVE with LANE_LINES=1: LL=2 is not required for apply.
+    assert r["forced_tja_while_mads"] is False
+    # Route 36 EPS EFFECTIVE with TJA=0 / LANE_LINES=1: forced TJA=4 is not required.
     active = [row for row in r["rows"] if row[1] == LKAS_TX_ACTIVE]
     assert active
-    assert all(row[2] == 4 and row[3] == 0 and row[4] == 1 and row[5] != 0 for row in active)
+    assert all(row[2] == 0 and row[3] == 0 and row[4] == 1 and row[5] != 0 for row in active)
 
   def test_route34(self):
-    r = self._replay(55.303, 61.213, fsc_lnv=1, desired=238)
+    r = self._replay(55.303, 61.213, fsc_lnv=1, desired=238, fsc_tja=0)
     assert r["pre_auth_nz"] is False
-    assert r["stayed_tja3"] is False
+    assert r["stayed_in_settle"] is False
     assert r["reached_active"] is True
-    assert r["tja0_while_req"] is False
+    assert r["forced_tja_while_mads"] is False
 
 
-class TestGoldenEnvelope:
-  def test_active_matches_route3c_tja4(self):
-    # Route 3C OEM-active correlated with LANE_LINES=2; copy that FSC value.
-    tx = _step(True, TJA3_ACTIVATION_HOLD_NS, 0, LKAS_TX_TRANSITION_TO_ACTIVE,
-               desired=163, fsc_lnv=1, fsc_ll=2)
+class TestOemHudOwnership:
+  def test_fsc_tja4_passes_when_fsc_produces_it(self):
+    tx = _step(True, STEER_ACTIVATION_HOLD_NS, 0, LKAS_TX_TRANSITION_TO_ACTIVE,
+               desired=163, fsc_lnv=1, fsc_tja=4, fsc_ll=2, fsc_hud_lnv=1, fsc_vis=0)
     _, v440 = _pack(tx)
     assert v440["TJA"] == 4
     assert v440["LANE_LINES"] == 2
     assert v440["LINE_NOT_VISIBLE"] == 1
     assert v440["LINE_VISIBLE"] == 0
 
-  def test_transition_matches_route3c_tja3(self):
-    tx = _step(True, 0, None, desired=163, fsc_lnv=1, fsc_ll=2)
+  def test_fsc_tja3_passes_when_fsc_produces_it(self):
+    tx = _step(True, 0, None, desired=163, fsc_lnv=1, fsc_tja=3, fsc_ll=2,
+               fsc_hud_lnv=0, fsc_vis=1)
     _, v440 = _pack(tx)
+    assert tx.state == LKAS_TX_TRANSITION_TO_ACTIVE
     assert v440["TJA"] == 3
     assert v440["LANE_LINES"] == 2
     assert v440["LINE_VISIBLE"] == 1
     assert v440["LINE_NOT_VISIBLE"] == 0
 
-  def test_route3c_ll2_is_copied_not_forced(self):
-    tx = _step(True, TJA3_ACTIVATION_HOLD_NS, 0, LKAS_TX_TRANSITION_TO_ACTIVE,
-               desired=163, fsc_lnv=1, fsc_ll=1)
+  def test_mads_active_does_not_force_tja4(self):
+    tx = _step(True, STEER_ACTIVATION_HOLD_NS, 0, LKAS_TX_TRANSITION_TO_ACTIVE,
+               desired=163, fsc_lnv=1, fsc_tja=0, fsc_ll=1)
     _, v440 = _pack(tx)
-    assert v440["TJA"] == 4
+    assert tx.state == LKAS_TX_ACTIVE
+    assert v440["TJA"] == 0
     assert v440["LANE_LINES"] == 1
 
 
-class TestHudLaneLinesCopy:
-  def _active(self, fsc_ll, desired=400):
-    return _step(True, TJA3_ACTIVATION_HOLD_NS, 0, LKAS_TX_TRANSITION_TO_ACTIVE,
-                 desired=desired, fsc_lnv=1, fsc_ll=fsc_ll)
+class TestHudOemCopyCases:
+  """Prompt section 9 A–E (HUD) + F–G (auth settle)."""
 
-  def test_a_active_fsc_ll0_copies_and_steers(self):
-    tx = self._active(0)
+  def _active(self, fsc_ll, desired=400, fsc_tja=0):
+    return _step(True, STEER_ACTIVATION_HOLD_NS, 0, LKAS_TX_TRANSITION_TO_ACTIVE,
+                 desired=desired, fsc_lnv=1, fsc_ll=fsc_ll, fsc_tja=fsc_tja)
+
+  def test_a_mads_active_fsc_tja2_ll1(self):
+    tx = self._active(1, fsc_tja=2)
     _, v440 = _pack(tx)
     assert tx.state == LKAS_TX_ACTIVE
-    assert v440["TJA"] == 4
-    assert v440["LANE_LINES"] == 0
-    assert tx.apply_torque == 400
-    assert tx.cam_lkas_lnv == 0
-
-  def test_b_active_fsc_ll1_copies_and_steers(self):
-    tx = self._active(1)
-    _, v440 = _pack(tx)
-    assert tx.state == LKAS_TX_ACTIVE
-    assert v440["TJA"] == 4
+    assert v440["TJA"] == 2
     assert v440["LANE_LINES"] == 1
     assert tx.apply_torque == 400
     assert tx.cam_lkas_lnv == 0
 
-  def test_c_active_fsc_ll2_copies_and_steers(self):
-    tx = self._active(2)
+  def test_b_mads_active_fsc_tja0(self):
+    tx = self._active(1, fsc_tja=0)
     _, v440 = _pack(tx)
-    assert tx.state == LKAS_TX_ACTIVE
-    assert v440["TJA"] == 4
-    assert v440["LANE_LINES"] == 2
+    assert v440["TJA"] == 0
     assert tx.apply_torque == 400
-    assert tx.cam_lkas_lnv == 0
 
-  def test_d_ll_change_while_active_is_hud_only(self):
-    t0 = TJA3_ACTIVATION_HOLD_NS
+  def test_c_fsc_lane_line_changes_follow_exactly(self):
+    t0 = STEER_ACTIVATION_HOLD_NS
     start = 0
     prev = LKAS_TX_TRANSITION_TO_ACTIVE
     seen = []
     for i, ll in enumerate((0, 1, 2, 0, 2, 1)):
-      tx = _step(True, t0 + i * 10_000_000, start, prev, desired=537, fsc_lnv=1, fsc_ll=ll)
+      tx = _step(True, t0 + i * 10_000_000, start, prev, desired=537, fsc_lnv=1,
+                 fsc_ll=ll, fsc_tja=2)
       start, prev = tx.handshake_start_ns, tx.state
       _, v440 = _pack(tx)
       assert tx.state == LKAS_TX_ACTIVE
-      assert v440["TJA"] == 4
+      assert v440["TJA"] == 2
       assert v440["LANE_LINES"] == ll
       assert tx.apply_torque == 537
       assert tx.cam_lkas_lnv == 0
       seen.append(ll)
     assert seen == [0, 1, 2, 0, 2, 1]
 
-  def test_e_tja4_independent_of_lane_lines(self):
-    for ll in (0, 1, 2, 3):
-      tx = self._active(ll, desired=90)
-      assert tx.state == LKAS_TX_ACTIVE
-      assert tx.tja == 4
-      assert tx.lane_lines == ll
+  def test_d_mads_state_changes_do_not_alter_tja(self):
+    fsc_tja = 2
+    idle = _step(False, 0, fsc_tja=fsc_tja, fsc_ll=1)
+    settle = _step(True, 0, None, idle.state, desired=200, fsc_tja=fsc_tja, fsc_ll=1)
+    active = _step(True, STEER_ACTIVATION_HOLD_NS, settle.handshake_start_ns, settle.state,
+                   desired=200, fsc_tja=fsc_tja, fsc_ll=1)
+    paused = _step(False, STEER_ACTIVATION_HOLD_NS + 10_000_000, active.handshake_start_ns,
+                   active.state, desired=200, fsc_tja=fsc_tja, fsc_ll=1)
+    for tx in (idle, settle, active, paused):
+      assert tx.tja == fsc_tja
+      _, v440 = _pack(tx)
+      assert v440["TJA"] == fsc_tja
+
+  def test_e_no_100hz_hud_flag(self):
+    for state_fn in (
+      lambda: _step(False, 0, fsc_tja=2),
+      lambda: _step(True, 0, None, desired=90, fsc_tja=0),
+      lambda: _step(True, STEER_ACTIVATION_HOLD_NS, 0, LKAS_TX_TRANSITION_TO_ACTIVE,
+                    desired=90, fsc_tja=0),
+    ):
+      assert state_fn().send_hud_every_frame is False
+
+  def test_f_panda_auth_false_request_zero(self):
+    tx = _step(False, 0, desired=1088, fsc_lnv=1)
+    assert tx.apply_torque == 0
+
+  def test_g_panda_auth_true_after_settle_resumes(self):
+    paused = _step(False, 100, None, LKAS_TX_ACTIVE, desired=200, fsc_tja=0)
+    tr = _step(True, 200, paused.handshake_start_ns, paused.state, desired=200)
+    assert tr.apply_torque == 0
+    act = _step(True, 200 + STEER_ACTIVATION_HOLD_NS, tr.handshake_start_ns, tr.state, desired=200)
+    assert act.state == LKAS_TX_ACTIVE
+    assert act.apply_torque == 200
+
+  def test_invalid_route3f_tuple_not_created_by_mads(self):
+    # Production must not invent (TJA=4, LL=1, VIS=0, LNV=1) solely because MADS is active.
+    tx = self._active(1, fsc_tja=0)
+    assert not (tx.tja == 4 and tx.lane_lines == 1 and tx.line_visible == 0 and tx.hud_lnv == 1)
+    # Nor MADS-created (TJA=3, LL=1, VIS=1, LNV=0) during settle.
+    settle = _step(True, 0, None, desired=200, fsc_tja=0, fsc_ll=1)
+    assert not (settle.tja == 3 and settle.lane_lines == 1 and settle.line_visible == 1 and settle.hud_lnv == 0)
 
 
 class TestStateFuzz:
@@ -366,7 +400,7 @@ class TestStateFuzz:
           for desired in (0, 12, 177, 200, 537, 1088, -1088):
             for fsc_tja in (0, 2, 3, 4):
               for fsc_ll in (0, 1, 2):
-                for elapsed in (0, TJA3_ACTIVATION_HOLD_NS):
+                for elapsed in (0, STEER_ACTIVATION_HOLD_NS):
                   start = 0 if lat and err1 == 0 else None
                   tx = _step(lat, elapsed, start, LKAS_TX_IDLE if start is None else LKAS_TX_TRANSITION_TO_ACTIVE,
                              desired=desired, fsc_lnv=fsc_lnv, fsc_tja=fsc_tja, err1=err1, fsc_ll=fsc_ll)
@@ -378,18 +412,19 @@ class TestStateFuzz:
                   v440 = _decode_440(hud[1])
                   wire = int(v243["LKAS_REQUEST"])
                   assert tx.lane_lines == fsc_ll
+                  assert tx.tja == fsc_tja
                   assert v440["LANE_LINES"] == fsc_ll
+                  assert v440["TJA"] == fsc_tja
+                  assert tx.send_hud_every_frame is False
                   if err1 or not lat:
                     assert wire == 0
                   if tx.state == LKAS_TX_TRANSITION_TO_ACTIVE:
                     assert wire == 0
-                    assert v440["TJA"] == 3
-                    assert tx.state != LKAS_TX_ACTIVE or elapsed >= TJA3_ACTIVATION_HOLD_NS
+                    assert elapsed < STEER_ACTIVATION_HOLD_NS or not lat or err1
                   if tx.state == LKAS_TX_ACTIVE:
-                    assert v440["TJA"] == 4
                     assert v243["LINE_NOT_VISIBLE"] == 0
-                  if wire != 0:
-                    assert v440["TJA"] != 0
-                    assert v440["TJA"] != 3
                   if err1:
                     assert tx.state == LKAS_TX_FAULT
+
+
+assert TJA3_ACTIVATION_HOLD_NS == STEER_ACTIVATION_HOLD_NS

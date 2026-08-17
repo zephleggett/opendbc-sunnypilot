@@ -2,9 +2,10 @@
 """CAM_LKAS packing and CarController handshake.
 
 Packer default (no tx_lnv) still copies FSC LINE_NOT_VISIBLE. Once latActive
-has completed the Route 3C 50 ms TJA=3 hold, the controller transmits the OEM
-active command state: CAM_LKAS LNV=0, independent of FSC painted-lane bits.
-FSC ERR_BIT_1/2 still zeros the request. Panda/MADS auth is CC.latActive.
+has completed the internal ~50 ms request=0 settle, the controller transmits
+CAM_LKAS LNV=0 with steering allowed, independent of FSC painted-lane bits and
+independent of FSC CAM_LANEINFO TJA. FSC ERR_BIT_1/2 still zeros the request.
+Panda/MADS auth is CC.latActive. 0x440 remains an FSC copy at ~2 Hz.
 """
 
 import random
@@ -262,3 +263,19 @@ class TestCarControllerLnvCoherence:
         assert int(v["LKAS_REQUEST"]) == 0
       else:
         assert abs(int(v["LKAS_REQUEST"])) > 0
+
+  def test_controller_hud_stays_at_2hz_while_mads_active(self):
+    # Route 3F: no 100 Hz CAM_LANEINFO while ACTIVE. frame%50 @ 100 Hz ≈ 2 Hz.
+    packed = mazdacan.create_steering_control(self.packer, self.CP, 0, 0, _lkas(lnv=1))
+    cam = CanData(packed[0], packed[1], 2)
+    CC = structs.CarControl()
+    CC.latActive = True
+    CC.actuators.torque = 0.2
+    CC_SP = structs.CarControlSP()
+    hud_count = 0
+    for _ in range(100):
+      self.t += 10_000_000
+      self.CI.update([(self.t, [cam])])
+      _, sends = self.CI.apply(CC.as_reader(), CC_SP, self.t)
+      hud_count += sum(1 for s in sends if s[0] == 0x440)
+    assert hud_count == 2
