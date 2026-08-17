@@ -42,6 +42,20 @@ def _lane(tja=0, ll=1, lnv=1, vis=0, tr=0):
   }
 
 
+def _lane_raw(lane: dict) -> bytes:
+  packer = CANPacker("mazda_2017")
+  values = {s: int(lane.get(s, 0)) for s in mazdacan.CAM_LANEINFO_SIGNALS}
+  return bytes(packer.make_can_msg("CAM_LANEINFO", 0, values)[1])
+
+
+def _hud(lane, mads_enabled=True, mads_available=True, fsc_raw=None):
+  packer = CANPacker("mazda_2017")
+  raw = _lane_raw(lane) if fsc_raw is None else bytes(fsc_raw)
+  return bytes(mazdacan.create_alert_command(
+    packer, lane, False, False, mads_enabled=mads_enabled,
+    mads_available=mads_available, fsc_raw=raw)[1])
+
+
 def _cp():
   CP = CarParams()
   CP.flags = int(MazdaFlags.GEN1)
@@ -78,7 +92,7 @@ def _pack(tx, fsc_lane=None, req=None):
                            vis=tx.line_visible, tr=tx.tja_transition)
   steer = mazdacan.create_steering_control(packer, _cp(), 3, torque, _lkas(lnv=1),
                                            tx_lnv=tx.cam_lkas_lnv)
-  hud = mazdacan.create_alert_command(packer, lane, False, False, tx=tx)
+  hud = mazdacan.create_alert_command(packer, lane, False, False, tx=tx, fsc_raw=_lane_raw(lane))
   return _decode_243(steer[1]), _decode_440(hud[1])
 
 
@@ -407,7 +421,8 @@ class TestStateFuzz:
                   steer = mazdacan.create_steering_control(packer, CP, 5, tx.apply_torque,
                                                            _lkas(lnv=fsc_lnv, err1=err1),
                                                            tx_lnv=tx.cam_lkas_lnv)
-                  hud = mazdacan.create_alert_command(packer, _lane(tja=fsc_tja, ll=fsc_ll), False, False, tx=tx)
+                  hud = mazdacan.create_alert_command(packer, _lane(tja=fsc_tja, ll=fsc_ll), False, False, tx=tx,
+                                                      fsc_raw=_lane_raw(_lane(tja=fsc_tja, ll=fsc_ll)))
                   v243 = _decode_243(steer[1])
                   v440 = _decode_440(hud[1])
                   wire = int(v243["LKAS_REQUEST"])
@@ -447,58 +462,66 @@ class TestFamilyGatedBinaryMadsHud:
   RARE_LL1 = "4201000030001b40"
   TR_WARN = dict(FAMILY_WHITE, TJA_TRANSITION=3)
 
-  def _raw(self, lane, mads_enabled):
-    packer = CANPacker("mazda_2017")
-    return bytes(mazdacan.create_alert_command(
-      packer, lane, False, False, mads_enabled=mads_enabled)[1]).hex()
+  def _raw(self, lane, mads_enabled, fsc_raw=None, mads_available=True):
+    return _hud(lane, mads_enabled=mads_enabled, mads_available=mads_available,
+                fsc_raw=fsc_raw).hex()
 
-  def _pack(self, lane, mads_enabled):
-    packer = CANPacker("mazda_2017")
-    return _decode_440(mazdacan.create_alert_command(
-      packer, lane, False, False, mads_enabled=mads_enabled)[1])
+  def _pack(self, lane, mads_enabled, fsc_raw=None):
+    return _decode_440(_hud(lane, mads_enabled=mads_enabled, fsc_raw=fsc_raw))
 
-  def test_a_family_off_mads_off_exact_off(self):
-    assert self._raw(self.FAMILY_OFF, mads_enabled=False) == self.OEM_OFF
+  def test_named_reconstruction_without_raw_does_not_remap(self):
+    packer = CANPacker("mazda_2017")
+    off = bytes(mazdacan.create_alert_command(
+      packer, self.FAMILY_OFF, False, False, mads_enabled=True)[1])
+    white = bytes(mazdacan.create_alert_command(
+      packer, self.FAMILY_WHITE, False, False, mads_enabled=False)[1])
+    assert off.hex() == self.OEM_OFF
+    assert white.hex() == self.OEM_WHITE
+    assert self._raw(self.FAMILY_OFF, mads_enabled=False,
+                     fsc_raw=bytes.fromhex(self.OEM_OFF)) == self.OEM_OFF
     assert mazdacan.suppress_steering_icon_hud(self.FAMILY_OFF, False)["TJA"] == 0
 
   def test_b_family_off_mads_on_exact_white(self):
-    assert self._raw(self.FAMILY_OFF, mads_enabled=True) == self.OEM_WHITE
+    assert self._raw(self.FAMILY_OFF, mads_enabled=True,
+                     fsc_raw=bytes.fromhex(self.OEM_OFF)) == self.OEM_WHITE
 
   def test_c_family_white_mads_off_exact_off(self):
-    assert self._raw(self.FAMILY_WHITE, mads_enabled=False) == self.OEM_OFF
+    assert self._raw(self.FAMILY_WHITE, mads_enabled=False,
+                     fsc_raw=bytes.fromhex(self.OEM_WHITE)) == self.OEM_OFF
 
   def test_d_family_white_mads_on_exact_white(self):
-    assert self._raw(self.FAMILY_WHITE, mads_enabled=True) == self.OEM_WHITE
+    assert self._raw(self.FAMILY_WHITE, mads_enabled=True,
+                     fsc_raw=bytes.fromhex(self.OEM_WHITE)) == self.OEM_WHITE
 
   def test_e_ll2_tja4_unchanged_regardless_of_mads(self):
     lane = _lane(tja=4, ll=2, lnv=1, vis=0)
+    raw = bytes.fromhex(self.OEM_LL2_TJA4)
     for mads in (False, True):
-      packer = CANPacker("mazda_2017")
-      dat = bytes(mazdacan.create_alert_command(packer, lane, False, False, mads_enabled=mads)[1])
+      dat = _hud(lane, mads_enabled=mads, fsc_raw=raw)
       assert dat.hex() == self.OEM_LL2_TJA4
       v = _decode_440(dat)
       assert v["TJA"] == 4
       assert v["LANE_LINES"] == 2
 
   def test_f_boot_s1_variant_unchanged(self):
-    lane = _decode_440(bytes.fromhex(self.BOOT_S1))
+    raw = bytes.fromhex(self.BOOT_S1)
+    lane = _decode_440(raw)
     for mads in (False, True):
-      assert self._raw(lane, mads_enabled=mads) == self.BOOT_S1
+      assert self._raw(lane, mads_enabled=mads, fsc_raw=raw) == self.BOOT_S1
 
   def test_g_rare_non_family_ll1_unchanged(self):
-    lane = _decode_440(bytes.fromhex(self.RARE_LL1))
+    raw = bytes.fromhex(self.RARE_LL1)
+    lane = _decode_440(raw)
     assert int(lane["TJA"]) == 3
-    off = self._raw(lane, mads_enabled=False)
-    on = self._raw(lane, mads_enabled=True)
-    assert off == on
+    off = self._raw(lane, mads_enabled=False, fsc_raw=raw)
+    on = self._raw(lane, mads_enabled=True, fsc_raw=raw)
+    assert off == on == self.RARE_LL1
     v = _decode_440(bytes.fromhex(off))
     assert v["TJA"] == 3
     assert off not in (self.OEM_OFF, self.OEM_WHITE)
 
   def test_h_tja_transition_warning_variant_unchanged(self):
-    packer = CANPacker("mazda_2017")
-    baseline = bytes(mazdacan.create_alert_command(
-      packer, self.TR_WARN, False, False, mads_enabled=True)[1]).hex()
+    baseline = _hud(self.TR_WARN, mads_enabled=True).hex()
     # TR=3 is not the proven pair; MADS must not rewrite it.
     assert baseline != self.OEM_OFF
     assert baseline != self.OEM_WHITE
@@ -510,7 +533,7 @@ class TestFamilyGatedBinaryMadsHud:
     transformed = []
     for lane, fsc_hex in ((self.FAMILY_OFF, self.OEM_OFF), (self.FAMILY_WHITE, self.OEM_WHITE)):
       for mads in (False, True):
-        out = self._raw(lane, mads_enabled=mads)
+        out = self._raw(lane, mads_enabled=mads, fsc_raw=bytes.fromhex(fsc_hex))
         assert out in allowed
         if out != fsc_hex:
           transformed.append(out)
@@ -532,38 +555,115 @@ class TestFamilyGatedBinaryMadsHud:
       (False, 2, 0),
     ]
     for mads, fsc_tja, expect_tja in seq:
+      fsc_hex = self.OEM_OFF if fsc_tja == 0 else self.OEM_WHITE
       lane = dict(self.FAMILY_WHITE)
       lane["TJA"] = fsc_tja
-      v = self._pack(lane, mads_enabled=mads)
+      v = self._pack(lane, mads_enabled=mads, fsc_raw=bytes.fromhex(fsc_hex))
       assert v["TJA"] == expect_tja
-      raw = self._raw(lane, mads_enabled=mads)
+      raw = self._raw(lane, mads_enabled=mads, fsc_raw=bytes.fromhex(fsc_hex))
       assert raw == (self.OEM_WHITE if mads else self.OEM_OFF)
 
   def test_mads_unavailable_is_pure_fsc(self):
-    packer = CANPacker("mazda_2017")
     cases = (
-      (self.FAMILY_OFF, self.OEM_OFF),
-      (self.FAMILY_WHITE, self.OEM_WHITE),
-      (_lane(tja=4, ll=2, lnv=1, vis=0), self.OEM_LL2_TJA4),
+      (self.FAMILY_OFF, bytes.fromhex(self.OEM_OFF), self.OEM_OFF),
+      (self.FAMILY_WHITE, bytes.fromhex(self.OEM_WHITE), self.OEM_WHITE),
+      (_lane(tja=4, ll=2, lnv=1, vis=0), bytes.fromhex(self.OEM_LL2_TJA4), self.OEM_LL2_TJA4),
+      (_decode_440(bytes.fromhex(self.RARE_LL1)), bytes.fromhex(self.RARE_LL1), self.RARE_LL1),
     )
-    for lane, expect in cases:
+    for lane, raw, expect in cases:
       for enabled in (False, True):
-        dat = bytes(mazdacan.create_alert_command(
-          packer, lane, False, False, mads_enabled=enabled, mads_available=False)[1])
+        dat = _hud(lane, mads_enabled=enabled, mads_available=False, fsc_raw=raw)
         assert dat.hex() == expect
 
   def test_err_bit_is_not_canonicalized_into_family(self):
-    packer = CANPacker("mazda_2017")
-    for base, mads in ((self.FAMILY_OFF, False), (self.FAMILY_WHITE, True)):
+    for base, mads, fsc_hex in (
+      (self.FAMILY_OFF, False, self.OEM_OFF),
+      (self.FAMILY_WHITE, True, self.OEM_WHITE),
+    ):
       faulted = dict(base, ERR_BIT=1)
+      raw = _lane_raw(faulted)
+      assert raw.hex() != fsc_hex
       assert not mazdacan._in_oem_ll1_off_white_family(faulted)
-      dat = bytes(mazdacan.create_alert_command(
-        packer, faulted, False, False, mads_enabled=mads)[1])
+      dat = _hud(faulted, mads_enabled=mads, fsc_raw=raw)
       assert dat.hex() not in (self.OEM_OFF, self.OEM_WHITE)
+      assert dat == raw
       v = _decode_440(dat)
       assert v["ERR_BIT"] == 1
       assert v["TJA"] == base["TJA"]
       assert v["LANE_LINES"] == 1
+
+  def test_unnamed_bit_mutations_are_not_family(self):
+    pair = {bytes.fromhex(self.OEM_OFF), bytes.fromhex(self.OEM_WHITE)}
+    mutated = []
+    for base in pair:
+      base_d = _decode_440(base)
+      for byte_i in range(8):
+        for bit_i in range(8):
+          raw = bytearray(base)
+          raw[byte_i] ^= 1 << bit_i
+          raw_b = bytes(raw)
+          if raw_b in pair:
+            continue
+          d = _decode_440(raw_b)
+          named_same = all(int(d.get(s, 0)) == int(base_d.get(s, 0))
+                           for s in mazdacan.CAM_LANEINFO_SIGNALS)
+          if named_same:
+            mutated.append(raw_b)
+    assert len(mutated) == 80
+    eligible = 0
+    rewrites = 0
+    for raw in mutated:
+      assert raw not in pair
+      for mads in (False, True):
+        out = _hud(_decode_440(raw), mads_enabled=mads, fsc_raw=raw)
+        if raw in mazdacan.OEM_LL1_HUD_FAMILY:
+          eligible += 1
+        if out in pair:
+          rewrites += 1
+        assert out == raw
+    assert eligible == 0
+    assert rewrites == 0
+
+  def test_named_non_family_not_eligible(self):
+    cases = (
+      dict(self.FAMILY_OFF, TJA_TRANSITION=1),
+      dict(self.FAMILY_WHITE, TJA_TRANSITION=3),
+      dict(self.FAMILY_OFF, HANDS_ON_STEER_WARN=1),
+      dict(self.FAMILY_OFF, S1=0),
+      _lane(tja=3, ll=1),
+      _lane(tja=1, ll=1),
+    )
+    pair = {self.OEM_OFF, self.OEM_WHITE}
+    for lane in cases:
+      raw = _lane_raw(lane)
+      assert raw.hex() not in pair
+      for mads in (False, True):
+        out = _hud(lane, mads_enabled=mads, fsc_raw=raw)
+        assert out == raw
+        assert out.hex() not in pair
+
+  def test_carstate_latches_exact_bus2_payload(self):
+    from opendbc.car import gen_empty_fingerprint, structs
+    from opendbc.car.can_definitions import CanData
+    from opendbc.car.mazda.interface import CarInterface
+    from opendbc.car.mazda.values import CAR
+
+    fingerprint = gen_empty_fingerprint()
+    CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, fingerprint, [], alpha_long=False,
+                                 is_release=False, docs=False)
+    CP_SP = CarInterface.get_params_sp(CP, CAR.MAZDA_CX5_2022, fingerprint, [],
+                                       alpha_long=False, is_release_sp=False, docs=False)
+    ci = CarInterface(CP, CP_SP)
+    mutated = bytes.fromhex("4601000000001040")
+    ci.update([(10_000_000, [CanData(0x440, mutated, 2)])])
+    assert ci.CS.cam_laneinfo_raw == mutated
+    cc = structs.CarControl()
+    cc_sp = structs.CarControlSP()
+    cc_sp.mads.available = True
+    cc_sp.mads.enabled = True
+    _, sends = ci.apply(cc.as_reader(), cc_sp, 10_000_000)
+    hud = next(s for s in sends if s[0] == 0x440)
+    assert bytes(hud[1]) == mutated
 
 
 assert TJA3_ACTIVATION_HOLD_NS == STEER_ACTIVATION_HOLD_NS

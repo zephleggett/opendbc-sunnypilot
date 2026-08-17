@@ -106,7 +106,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       can_sends.append(mazdacan.create_alert_command(self.packer, CS.cam_laneinfo, ldw, steer_required,
                                                      apply_torque=apply_torque, cam_lkas=CS.cam_lkas, tx=tx,
                                                      mads_available=bool(CC_SP.mads.available),
-                                                     mads_enabled=bool(CC_SP.mads.enabled)))
+                                                     mads_enabled=bool(CC_SP.mads.enabled),
+                                                     fsc_raw=getattr(CS, "cam_laneinfo_raw", None)))
 
     # send steering command
     can_sends.append(mazdacan.create_steering_control(self.packer, self.CP,

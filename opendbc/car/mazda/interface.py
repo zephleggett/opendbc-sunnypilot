@@ -7,11 +7,29 @@ from opendbc.car.mazda.carstate import CarState
 from opendbc.car.mazda.radar_interface import RadarInterface
 from opendbc.car.mazda.values import CAR, DBC, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaSafetyFlags
 
+CAM_LANEINFO_ADDR = 0x440
+CAM_LANEINFO_RX_BUS = 2
+
+
+def latch_cam_laneinfo_raw(can_packets, prev: bytes | None) -> bytes | None:
+  """Keep the last FSC-received CAM_LANEINFO 8-byte payload from camera bus 2."""
+  raw = prev
+  for _t, frames in can_packets:
+    for msg in frames:
+      addr, dat, src = (msg.address, msg.dat, msg.src) if hasattr(msg, "address") else msg
+      if addr == CAM_LANEINFO_ADDR and src == CAM_LANEINFO_RX_BUS and len(dat) == 8:
+        raw = bytes(dat)
+  return raw
+
 
 class CarInterface(CarInterfaceBase):
   CarState = CarState
   CarController = CarController
   RadarInterface = RadarInterface
+
+  def update(self, can_packets):
+    self.CS.cam_laneinfo_raw = latch_cam_laneinfo_raw(can_packets, self.CS.cam_laneinfo_raw)
+    return super().update(can_packets)
 
   @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:

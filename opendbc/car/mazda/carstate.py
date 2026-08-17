@@ -39,6 +39,7 @@ class CarState(CarStateBase, CarStateExt):
     self.stock_radar_silent_frames = 0
     self.cam_laneinfo_seen = False
     self.fsc_settled_frames = 0
+    self.cam_laneinfo_raw: bytes | None = None
 
   @property
   def fsc_settled(self) -> bool:

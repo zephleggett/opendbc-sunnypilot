@@ -291,7 +291,7 @@ def suppress_steering_icon_hud(cam_msg: dict, mads_enabled: bool) -> dict:
 
 
 def _family_gated_mads_hud_dat(dat: bytes, mads_enabled: bool) -> bytes:
-  # Wire-level gate: only swap when the packed 8-byte frame is exactly the pair.
+  # Wire-level gate: only swap when the live 8-byte FSC frame is exactly the pair.
   if dat not in OEM_LL1_HUD_FAMILY:
     return dat
   return OEM_LL1_HUD_WHITE if mads_enabled else OEM_LL1_HUD_OFF
@@ -300,18 +300,24 @@ def _family_gated_mads_hud_dat(dat: bytes, mads_enabled: bool) -> bytes:
 def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
                          apply_torque: int = 0, cam_lkas: dict | None = None,
                          tx: LkasTx | None = None, mads_enabled: bool = True,
-                         mads_available: bool = True):
-  # Pack the live FSC CAM_LANEINFO, including fault/status bits. Family remap is
-  # allowed only when MADS is available AND the live message is the proven pair.
+                         mads_available: bool = True, fsc_raw: bytes | None = None):
+  # Family remap is allowed only when MADS is available AND the live FSC 0x440
+  # 8-byte payload is exactly the proven OFF/WHITE pair. Named-signal equality
+  # is not sufficient: DBC does not cover every bit.
   # `tx` / `ldw` / `steer_required` / apply_torque / cam_lkas kept for API compatibility.
   del apply_torque, cam_lkas, tx, ldw, steer_required
+  raw = bytes(fsc_raw) if fsc_raw is not None else None
+  if raw is not None and len(raw) == 8:
+    if mads_available:
+      dat = _family_gated_mads_hud_dat(raw, mads_enabled)
+    else:
+      dat = raw
+    return 0x440, dat, 0
+  # No live payload (tests / pre-first-frame): pack named signals only. Never
+  # treat reconstructed equality as family membership.
   values = {s: int(cam_msg.get(s, 0)) for s in CAM_LANEINFO_SIGNALS}
   addr, dat, bus = packer.make_can_msg("CAM_LANEINFO", 0, values)
-  if mads_available and _in_oem_ll1_off_white_family(cam_msg):
-    dat = OEM_LL1_HUD_WHITE if mads_enabled else OEM_LL1_HUD_OFF
-  else:
-    dat = bytes(dat)
-  return addr, dat, bus
+  return addr, bytes(dat), bus
 
 
 def create_button_cmd(packer, CP, counter, button, CS=None):
