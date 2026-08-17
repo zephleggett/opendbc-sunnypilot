@@ -80,7 +80,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       if self.frame % 10 == 0 and not (CS.out.brakePressed and self.brake_counter < 7):
         # Cancel Stock ACC if it's enabled while OP is disengaged
         # Send at a rate of 10hz until we sync with stock ACC state
-        can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.CANCEL))
+        can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.CANCEL, CS))
     else:
       self.brake_counter = 0
       if CC.cruiseControl.resume and self.frame % 5 == 0:
@@ -88,7 +88,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         # Send Resume button when planner wants car to move. With openpilot longitudinal the
         # RES press asks the body ECU to leave its standstill hold; only meaningful from a stop.
         if not self.CP.openpilotLongitudinalControl or CS.out.standstill:
-          can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.RESUME))
+          can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.RESUME, CS))
           virtual_resume_sent = self.CP.openpilotLongitudinalControl
 
     self.apply_torque_last = apply_torque
@@ -117,9 +117,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     # Intelligent Cruise Button Management
     # Suppress ICBM CRZ_BTNS spam while cancel/resume are in flight or while the driver is
-    # holding the wheel cancel button. Without this guard ICBM's interleaved cancel=0 frames
-    # race the driver's cancel=1 frames on the bus and the body ECU drops the cancel intent.
-    icbm_suppress = CC.cruiseControl.cancel or CC.cruiseControl.resume or CS.cancel_button == 1
+    # holding wheel cancel or TJA. Without this guard ICBM's interleaved frames (historically
+    # with TJA_BUTTON=0) race the wheel's own CRZ_BTNS and can fabricate TJA edges.
+    icbm_suppress = (CC.cruiseControl.cancel or CC.cruiseControl.resume or
+                     CS.cancel_button == 1 or CS.tja_button == 1)
     if not icbm_suppress:
       can_sends.extend(IntelligentCruiseButtonManagementInterface.update(self, CC_SP, CS, self.packer, self.frame, self.last_button_frame))
 

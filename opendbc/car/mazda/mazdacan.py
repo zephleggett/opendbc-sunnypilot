@@ -311,12 +311,14 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
   return addr, _family_gated_mads_hud_dat(bytes(dat), mads_enabled), bus
 
 
-def create_button_cmd(packer, CP, counter, button):
-
+def create_button_cmd(packer, CP, counter, button, CS=None):
   can = int(button == Buttons.CANCEL)
   res = int(button == Buttons.RESUME)
   inc = int(button == Buttons.SET_PLUS)
   dec = int(button == Buttons.SET_MINUS)
+  tja = int(getattr(CS, "tja_button", 0) == 1)
+  mode_x = int(getattr(CS, "mode_x", 0) == 1)
+  mode_y = int(getattr(CS, "mode_y", 0) == 1)
 
   if CP.flags & MazdaFlags.GEN1:
     values = {
@@ -338,11 +340,13 @@ def create_button_cmd(packer, CP, counter, button):
       "DISTANCE_MORE": 0,
       "DISTANCE_MORE_INV": 1,
 
-      "MODE_X": 0,
-      "MODE_X_INV": 1,
-
-      "MODE_Y": 0,
-      "MODE_Y_INV": 1,
+      # Copy live wheel bits so OP CRZ_BTNS cannot fabricate a TJA 1→0→1 edge
+      # or drop MODE_X/Y while cancel/resume/ICBM is on the bus.
+      "TJA_BUTTON": tja,
+      "MODE_X": mode_x,
+      "MODE_X_INV": (mode_x + 1) % 2,
+      "MODE_Y": mode_y,
+      "MODE_Y_INV": (mode_y + 1) % 2,
 
       "BIT1": 1,
       "BIT2": 1,

@@ -11,10 +11,11 @@ import random
 
 import pytest
 
-from opendbc.can import CANPacker
+from opendbc.can import CANPacker, CANParser
 from opendbc.car import gen_empty_fingerprint, structs
+from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.interface import CarInterface
-from opendbc.car.mazda.values import CAR
+from opendbc.car.mazda.values import CAR, Buttons
 
 ButtonType = structs.CarState.ButtonEvent.Type
 
@@ -42,23 +43,19 @@ def _ci(*, alpha_long=True):
   return CarInterface(CP, CP_SP)
 
 
-def _crz_btns(packer, *, tja=0, mrcc=0, set_p=0, set_m=0, res=0, can_off=0, mode_xy=0):
-  addr, dat, bus = packer.make_can_msg("CRZ_BTNS", 0, {
+def _crz_btns(packer, *, tja=0, set_p=0, set_m=0, res=0, can_off=0, mode_x=0, mode_y=0):
+  return packer.make_can_msg("CRZ_BTNS", 0, {
     "TJA_BUTTON": tja,
     "SET_P": set_p,
     "SET_M": set_m,
     "RES": res,
     "CAN_OFF": can_off,
-    "MODE_X": mode_xy,
-    "MODE_Y": mode_xy,
+    "MODE_X": mode_x,
+    "MODE_Y": mode_y,
     "BIT1": 1,
     "BIT2": 1,
     "BIT3": 1,
   })
-  if mrcc:
-    # Physical MRCC is DBC bit 15 (byte 1 MSB). Not a production signal.
-    dat = bytes((dat[0], dat[1] | 0x80, *dat[2:]))
-  return addr, dat, bus
 
 
 class ButtonHarness:
@@ -67,11 +64,11 @@ class ButtonHarness:
     self.packer = CANPacker("mazda_2017")
     self.t = 0
 
-  def step(self, *, tja=0, mrcc=0, acc_off=0, acc_active=0, set_p=0, set_m=0,
-           res=0, can_off=0, mode_xy=0, crz_available=0, crz_active=0):
+  def step(self, *, tja=0, acc_off=0, acc_active=0, set_p=0, set_m=0,
+           res=0, can_off=0, mode_x=0, mode_y=0, crz_available=0, crz_active=0):
     self.t += 10_000_000
-    crz = _crz_btns(self.packer, tja=tja, mrcc=mrcc, set_p=set_p, set_m=set_m,
-                    res=res, can_off=can_off, mode_xy=mode_xy)
+    crz = _crz_btns(self.packer, tja=tja, set_p=set_p, set_m=set_m,
+                    res=res, can_off=can_off, mode_x=mode_x, mode_y=mode_y)
     pedals = self.packer.make_can_msg("PEDALS", 0, {
       "ACC_OFF": acc_off,
       "ACC_ACTIVE": acc_active,
@@ -142,16 +139,31 @@ class TestMazdaTjaButton:
       presses += sum(1 for be in _events(cs, ButtonType.lkas) if be.pressed)
     assert presses == 4
 
+  def test_mode_x_y_do_not_emit_lkas_or_maincruise(self, alpha_long):
+    h = ButtonHarness(alpha_long=alpha_long)
+    h.step()
+    for kwargs in ({"mode_x": 1}, {"mode_y": 1}, {"mode_x": 1, "mode_y": 1}):
+      h.step()
+      cs = h.step(**kwargs)
+      assert not _events(cs, ButtonType.lkas)
+      assert not _events(cs, ButtonType.mainCruise)
+      held = h.step(**kwargs)
+      assert not _events(held, ButtonType.lkas)
+      assert not _events(held, ButtonType.mainCruise)
+      release = h.step()
+      assert not _events(release, ButtonType.lkas)
+      assert not _events(release, ButtonType.mainCruise)
+
   def test_mrcc_does_not_emit_lkas_or_maincruise(self, alpha_long):
     h = ButtonHarness(alpha_long=alpha_long)
     h.step()
-    cs = h.step(mrcc=1)
+    cs = h.step(mode_x=1, mode_y=1)
     assert not _events(cs, ButtonType.lkas)
     assert not _events(cs, ButtonType.mainCruise)
-    held = h.step(mrcc=1)
+    held = h.step(mode_x=1, mode_y=1)
     assert not _events(held, ButtonType.lkas)
     assert not _events(held, ButtonType.mainCruise)
-    release = h.step(mrcc=0)
+    release = h.step()
     assert not _events(release, ButtonType.lkas)
     assert not _events(release, ButtonType.mainCruise)
 
@@ -192,17 +204,18 @@ class TestMazdaTjaButton:
       tja = rng.choice((0, 0, 0, 1))
       kwargs = {
         "tja": tja,
-        "mrcc": rng.choice((0, 0, 1)),
+        "mode_x": rng.choice((0, 0, 1)),
+        "mode_y": rng.choice((0, 0, 1)),
         "set_p": rng.choice((0, 0, 1)),
         "set_m": rng.choice((0, 0, 1)),
         "res": rng.choice((0, 0, 1)),
         "can_off": rng.choice((0, 0, 1)),
-        "mode_xy": rng.choice((0, 0, 1)),
       }
       cs = h.step(**kwargs)
       if tja == 1 and prev_tja == 0:
         expected += 1
       actual += sum(1 for be in _events(cs, ButtonType.lkas) if be.pressed)
+      assert not _events(cs, ButtonType.mainCruise)
       if tja == prev_tja:
         assert not any(be.pressed for be in _events(cs, ButtonType.lkas))
       if tja == 0 and prev_tja == 1:
@@ -270,21 +283,21 @@ class TestMazdaTjaCruiseState:
     h = ButtonHarness()
     h.step()
     # MRCC press with OEM still off: cruise stays off.
-    mrcc_off = h.step(mrcc=1)
+    mrcc_off = h.step(mode_x=1, mode_y=1)
     assert not mrcc_off.cruiseState.available
     assert not mrcc_off.cruiseState.enabled
     h.step()
     # OEM arms via PEDALS, with or without the MRCC bit.
-    armed = h.step(mrcc=1, acc_off=1)
+    armed = h.step(mode_x=1, mode_y=1, acc_off=1)
     assert armed.cruiseState.available
     assert not armed.cruiseState.enabled
     assert not _events(armed, ButtonType.lkas)
     h.step(acc_off=1)
-    active = h.step(mrcc=1, acc_off=1, acc_active=1)
+    active = h.step(mode_x=1, mode_y=1, acc_off=1, acc_active=1)
     assert active.cruiseState.available
     assert active.cruiseState.enabled
     h.step(acc_off=1, acc_active=1)
-    off = h.step(mrcc=1, acc_off=0, acc_active=0)
+    off = h.step(mode_x=1, mode_y=1, acc_off=0, acc_active=0)
     assert not off.cruiseState.available
     assert not off.cruiseState.enabled
     assert not _events(off, ButtonType.lkas)
@@ -292,11 +305,65 @@ class TestMazdaTjaCruiseState:
   def test_stock_long_mrcc_does_not_emit_lkas(self):
     h = ButtonHarness(alpha_long=False)
     h.step()
-    armed = h.step(mrcc=1, crz_available=1)
+    armed = h.step(mode_x=1, mode_y=1, crz_available=1)
     assert armed.cruiseState.available
     assert not armed.cruiseState.enabled
     assert not _events(armed, ButtonType.lkas)
-    active = h.step(mrcc=1, crz_available=1, crz_active=1)
+    active = h.step(mode_x=1, mode_y=1, crz_available=1, crz_active=1)
     assert active.cruiseState.available
     assert active.cruiseState.enabled
     assert not _events(active, ButtonType.lkas)
+
+
+def _decode_crz_btns(dat):
+  cp = CANParser("mazda_2017", [("CRZ_BTNS", float("nan"))], 0)
+  cp.update([(0, [(0x09d, dat, 0)])])
+  return cp.vl["CRZ_BTNS"]
+
+
+class TestCreateButtonCmdPreservesWheelBits:
+  def test_zeroing_tja_would_fabricate_an_edge(self):
+    # Failure path: OP cancel/resume historically packed TJA_BUTTON=0. If that TX
+    # is visible on bus 0 (OEM always; CarState if looped), a held TJA becomes 1→0→1.
+    h = ButtonHarness()
+    h.step()
+    h.step(tja=1)
+    fake_zero = _crz_btns(h.packer, tja=0, can_off=1)
+    cs = h.ci.update([(h.t + 10_000_000, [fake_zero])])[0]
+    falling = _events(cs, ButtonType.lkas)
+    assert len(falling) == 1 and not falling[0].pressed
+    restored = h.step(tja=1)
+    rising = _events(restored, ButtonType.lkas)
+    assert len(rising) == 1 and rising[0].pressed
+
+  def test_op_cancel_preserves_held_tja_and_mode(self):
+    ci = _ci()
+    packer = CANPacker("mazda_2017")
+    cs_src = type("CS", (), {"tja_button": 1, "mode_x": 1, "mode_y": 0, "crz_btns_counter": 3})()
+    addr, dat, bus = mazdacan.create_button_cmd(packer, ci.CP, 3, Buttons.CANCEL, cs_src)
+    assert addr == 0x09d and bus == 0
+    decoded = _decode_crz_btns(dat)
+    assert decoded["CAN_OFF"] == 1
+    assert decoded["TJA_BUTTON"] == 1
+    assert decoded["MODE_X"] == 1
+    assert decoded["MODE_Y"] == 0
+    assert decoded["RES"] == 0
+
+    # Same TX fed to CarState while TJA is already held: no extra lkas press.
+    h = ButtonHarness()
+    h.step()
+    h.step(tja=1)
+    cs = h.ci.update([(h.t + 10_000_000, [(addr, dat, bus)])])[0]
+    assert not any(be.pressed for be in _events(cs, ButtonType.lkas))
+    assert h.ci.CS.tja_button == 1
+
+  def test_op_resume_idle_wheel_stays_tja_zero(self):
+    ci = _ci()
+    packer = CANPacker("mazda_2017")
+    cs_src = type("CS", (), {"tja_button": 0, "mode_x": 0, "mode_y": 0, "crz_btns_counter": 1})()
+    _, dat, _ = mazdacan.create_button_cmd(packer, ci.CP, 1, Buttons.RESUME, cs_src)
+    decoded = _decode_crz_btns(dat)
+    assert decoded["RES"] == 1
+    assert decoded["TJA_BUTTON"] == 0
+    assert decoded["CAN_OFF"] == 0
+

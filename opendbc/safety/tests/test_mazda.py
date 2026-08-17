@@ -155,6 +155,18 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.assertEqual(0, self.safety.get_mads_button_press())
     self.assertFalse(self.safety.get_controls_allowed_lateral())
 
+  def test_mode_x_y_do_not_grant_mads_lateral(self):
+    self.safety.set_mads_params(True, False, False)
+    for values in (
+      {"MODE_X": 1, "MODE_Y": 0},
+      {"MODE_X": 0, "MODE_Y": 1},
+      {"MODE_X": 1, "MODE_Y": 1},
+    ):
+      msg = self.packer.make_can_msg_safety("CRZ_BTNS", 0, {**values, "BIT1": 1, "BIT2": 1, "BIT3": 1})
+      self._rx(msg)
+      self.assertEqual(0, self.safety.get_mads_button_press())
+      self.assertFalse(self.safety.get_controls_allowed_lateral())
+
 
 class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafetyTest):
 
