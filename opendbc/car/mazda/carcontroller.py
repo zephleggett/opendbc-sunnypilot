@@ -98,13 +98,18 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     # HUD: forward FSC CAM_LANEINFO at the stock ~2 Hz cadence (frame%50 @ 100 Hz).
     # Route 3F: do not accelerate 0x440 while MADS is active.
+    # MADS ON: FSC intact. MADS OFF (feature available): suppress steering-assist
+    # TJA icon only when an OEM-valid OFF representation exists (LL<=1).
     if self.frame % 50 == 0:
       ldw = CC.hudControl.visualAlert == VisualAlert.ldw
       steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
       # TODO: find a way to silence audible warnings so we can add more hud alerts
       steer_required = steer_required and CS.lkas_allowed_speed
+      # If MADS is not available, keep stock FSC HUD (do not suppress OEM icons).
+      mads_enabled = True if not CC_SP.mads.available else bool(CC_SP.mads.enabled)
       can_sends.append(mazdacan.create_alert_command(self.packer, CS.cam_laneinfo, ldw, steer_required,
-                                                     apply_torque=apply_torque, cam_lkas=CS.cam_lkas, tx=tx))
+                                                     apply_torque=apply_torque, cam_lkas=CS.cam_lkas, tx=tx,
+                                                     mads_enabled=mads_enabled))
 
     # send steering command
     can_sends.append(mazdacan.create_steering_control(self.packer, self.CP,

@@ -427,4 +427,110 @@ class TestStateFuzz:
                     assert tx.state == LKAS_TX_FAULT
 
 
+class TestMadsOffSteeringIconSuppression:
+  """Route 41 opposite-icon fix: suppress FSC TJA icon only when MADS is OFF.
+
+  OEM evidence (3C/41): LL=1 WHITE 4201000020001040 → OFF 4201000000001040
+  differs only in TJA. TJA_TRANSITION is cleared to 0 (OEM OFF never keeps TR=3).
+  """
+
+  ROUTE41_WHITE = {
+    "TJA": 2, "TJA_TRANSITION": 0, "LANE_LINES": 1,
+    "LINE_VISIBLE": 0, "LINE_NOT_VISIBLE": 1,
+    "BIT1": 1, "BIT2": 0, "BIT3": 1, "NO_ERR_BIT": 0, "S1": 1, "S1_HBEAM": 0,
+  }
+  ROUTE41_OEM_OFF = "4201000000001040"
+
+  def _pack(self, lane, mads_enabled):
+    packer = CANPacker("mazda_2017")
+    return _decode_440(mazdacan.create_alert_command(
+      packer, lane, False, False, mads_enabled=mads_enabled)[1])
+
+  def test_a_mads_on_fsc_tja0_unchanged(self):
+    lane = _lane(tja=0, ll=1)
+    v = self._pack(lane, mads_enabled=True)
+    assert v["TJA"] == 0
+    assert v["LANE_LINES"] == 1
+
+  def test_b_mads_on_fsc_tja2_unchanged(self):
+    v = self._pack(self.ROUTE41_WHITE, mads_enabled=True)
+    assert v["TJA"] == 2
+    assert v["LANE_LINES"] == 1
+    assert v["LINE_NOT_VISIBLE"] == 1
+    assert v["BIT1"] == 1
+    assert v["BIT3"] == 1
+    assert v["S1"] == 1
+
+  def test_c_mads_off_fsc_tja0_unchanged(self):
+    lane = _lane(tja=0, ll=1)
+    v = self._pack(lane, mads_enabled=False)
+    assert v["TJA"] == 0
+    assert v["LANE_LINES"] == 1
+
+  def test_d_mads_off_route41_white_becomes_oem_off(self):
+    packer = CANPacker("mazda_2017")
+    addr, dat, bus = mazdacan.create_alert_command(
+      packer, self.ROUTE41_WHITE, False, False, mads_enabled=False)
+    assert bytes(dat).hex() == self.ROUTE41_OEM_OFF
+    v = _decode_440(dat)
+    assert v["TJA"] == 0
+    assert v["TJA_TRANSITION"] == 0
+    assert v["LANE_LINES"] == 1
+    assert v["LINE_NOT_VISIBLE"] == 1
+    assert v["BIT1"] == 1
+    assert v["BIT3"] == 1
+    assert v["S1"] == 1
+
+  def test_e_cruise_fields_untouched_by_suppression(self):
+    # create_alert_command only packs CAM_LANEINFO; ACC_OFF/CRZ live elsewhere.
+    # Suppression must not invent TJA=2/3/4 or change LL/VIS while clearing TJA.
+    v = self._pack(self.ROUTE41_WHITE, mads_enabled=False)
+    assert v["TJA"] == 0
+    assert v["LANE_LINES"] == self.ROUTE41_WHITE["LANE_LINES"]
+    assert v["LINE_VISIBLE"] == self.ROUTE41_WHITE["LINE_VISIBLE"]
+    assert v["LINE_NOT_VISIBLE"] == self.ROUTE41_WHITE["LINE_NOT_VISIBLE"]
+
+  def test_f_no_mads_driven_tja_synthesis(self):
+    for tja in (0, 2, 3, 4):
+      v_on = self._pack(_lane(tja=tja, ll=1), mads_enabled=True)
+      assert v_on["TJA"] == tja  # never invent; only pass through
+      v_off = self._pack(_lane(tja=tja, ll=1), mads_enabled=False)
+      assert v_off["TJA"] == 0  # suppress only; never synthesize 2/3/4
+      assert v_off["TJA"] not in (2, 3, 4)
+  def test_ll2_white_not_hybridized(self):
+    # Route 3C: TJA=0 with LL=2 was never OEM OFF — leave FSC intact.
+    lane = _lane(tja=2, ll=2, lnv=1, vis=0)
+    v = self._pack(lane, mads_enabled=False)
+    assert v["TJA"] == 2
+    assert v["LANE_LINES"] == 2
+
+  def test_tr3_white_clears_transition(self):
+    lane = dict(self.ROUTE41_WHITE)
+    lane["TJA_TRANSITION"] = 3
+    packer = CANPacker("mazda_2017")
+    dat = mazdacan.create_alert_command(packer, lane, False, False, mads_enabled=False)[1]
+    assert bytes(dat).hex() == self.ROUTE41_OEM_OFF
+
+  def test_route41_parity_counterfactual(self):
+    # MRCC OFF / TJA#1 / TJA#2 / TJA#3 visual steering-icon expectation.
+    seq = [
+      # after MRCC OFF: MADS ON, OEM OFF
+      (True, 0, 0),
+      # after TJA#1: MADS OFF, OEM WHITE → suppressed
+      (False, 2, 0),
+      # after TJA#2: MADS ON, OEM OFF
+      (True, 0, 0),
+      # after TJA#3: MADS OFF, OEM WHITE → suppressed
+      (False, 2, 0),
+    ]
+    for mads, fsc_tja, expect_tja in seq:
+      lane = dict(self.ROUTE41_WHITE)
+      lane["TJA"] = fsc_tja
+      v = self._pack(lane, mads_enabled=mads)
+      assert v["TJA"] == expect_tja
+      # never show inverse steering icon (MADS off + TJA!=0)
+      if not mads:
+        assert v["TJA"] == 0
+
+
 assert TJA3_ACTIVATION_HOLD_NS == STEER_ACTIVATION_HOLD_NS
