@@ -497,6 +497,7 @@ class TestMadsOffSteeringIconSuppression:
       v_off = self._pack(_lane(tja=tja, ll=1), mads_enabled=False)
       assert v_off["TJA"] == 0  # suppress only; never synthesize 2/3/4
       assert v_off["TJA"] not in (2, 3, 4)
+
   def test_ll2_white_not_hybridized(self):
     # Route 3C: TJA=0 with LL=2 was never OEM OFF — leave FSC intact.
     lane = _lane(tja=2, ll=2, lnv=1, vis=0)
