@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import random
 import unittest
 
 from opendbc.car.mazda.values import MazdaSafetyFlags
@@ -166,6 +167,115 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
       self._rx(msg)
       self.assertEqual(0, self.safety.get_mads_button_press())
       self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  # FSC-only TJA isolation: Intel bit 11 (byte 1 bit 3) on the bus0->bus2 copy.
+  _TJA_BYTE = 1
+  _TJA_MASK = 0x08
+
+  @staticmethod
+  def _pkt_bytes(msg):
+    return bytes(msg[0].data[0:8])
+
+  def _fwd_copy(self, src_bus, msg):
+    orig = self._pkt_bytes(msg)
+    clone = libsafety_py.make_CANPacket(int(msg[0].addr), int(msg[0].bus), orig)
+    self.safety.safety_fwd_modify(src_bus, clone)
+    return orig, self._pkt_bytes(clone)
+
+  def _assert_only_tja_cleared(self, orig, fwd):
+    self.assertEqual(len(orig), 8)
+    self.assertEqual(len(fwd), 8)
+    expected = bytearray(orig)
+    expected[self._TJA_BYTE] &= ~self._TJA_MASK
+    self.assertEqual(bytes(expected), fwd)
+    for bit in range(64):
+      orig_bit = (orig[bit // 8] >> (bit % 8)) & 1
+      fwd_bit = (fwd[bit // 8] >> (bit % 8)) & 1
+      if bit == 11:
+        self.assertEqual(0, fwd_bit)
+      else:
+        self.assertEqual(orig_bit, fwd_bit, f"bit {bit} changed")
+
+  def test_fsc_tja_isolation_panda_rx_sees_original_and_fwd_clears_tja(self):
+    self.safety.set_mads_params(True, False, False)
+    msg = self._lkas_button_msg(True)
+    orig = self._pkt_bytes(msg)
+    self.assertEqual(self._TJA_MASK, orig[self._TJA_BYTE] & self._TJA_MASK)
+
+    self.assertEqual(2, self.safety.safety_fwd_hook(0, 0x09d))
+    orig_fwd, fwd = self._fwd_copy(0, msg)
+    self.assertEqual(orig, orig_fwd)
+    self.assertEqual(0, fwd[self._TJA_BYTE] & self._TJA_MASK)
+    self._assert_only_tja_cleared(orig, fwd)
+
+    # Original bus0 frame is what mazda_rx_hook sees (fdcan RX uses to_push).
+    self._rx(msg)
+    self.assertEqual(1, self.safety.get_mads_button_press())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertEqual(orig, self._pkt_bytes(msg))
+
+  def test_fsc_tja_isolation_tja_zero_frame_unchanged(self):
+    msg = self._lkas_button_msg(False)
+    orig, fwd = self._fwd_copy(0, msg)
+    self.assertEqual(0, orig[self._TJA_BYTE] & self._TJA_MASK)
+    self.assertEqual(orig, fwd)
+
+  def test_fsc_tja_isolation_preserves_set_res_cancel_mode_bits(self):
+    combos = (
+      {"SET_P": 1, "SET_P_INV": 0},
+      {"SET_M": 1, "SET_M_INV": 0},
+      {"RES": 1, "RES_INV": 0},
+      {"CAN_OFF": 1, "CAN_OFF_INV": 0},
+      {"MODE_X": 1, "MODE_X_INV": 0},
+      {"MODE_Y": 1, "MODE_Y_INV": 0},
+      {"SET_P": 1, "SET_P_INV": 0, "RES": 1, "RES_INV": 0, "CAN_OFF": 1, "CAN_OFF_INV": 0,
+       "MODE_X": 1, "MODE_X_INV": 0, "MODE_Y": 1, "MODE_Y_INV": 0, "TJA_BUTTON": 1},
+    )
+    for values in combos:
+      msg = self.packer.make_can_msg_safety("CRZ_BTNS", 0, {**values, "BIT1": 1, "BIT2": 1, "BIT3": 1})
+      orig, fwd = self._fwd_copy(0, msg)
+      self._assert_only_tja_cleared(orig, fwd)
+
+  def test_fsc_tja_isolation_reserved_bit_corpus(self):
+    rng = random.Random(47)
+    for _ in range(256):
+      dat = bytes(rng.getrandbits(8) for _ in range(8))
+      msg = libsafety_py.make_CANPacket(0x09d, 0, dat)
+      orig, fwd = self._fwd_copy(0, msg)
+      self._assert_only_tja_cleared(orig, fwd)
+
+  def test_fsc_tja_isolation_does_not_touch_other_addrs_or_bus2(self):
+    dat = bytes(range(8))
+    for addr in (0x21c, 0x21b, 0x440, 0x243, 0x165, 0x202):
+      msg = libsafety_py.make_CANPacket(addr, 0, dat)
+      orig, fwd = self._fwd_copy(0, msg)
+      self.assertEqual(orig, fwd)
+
+    msg = libsafety_py.make_CANPacket(0x09d, 2, dat)
+    orig, fwd = self._fwd_copy(2, msg)
+    self.assertEqual(orig, fwd)
+
+  def test_fsc_tja_isolation_hold_release_does_not_fabricate_mads_edges(self):
+    self.safety.set_mads_params(True, False, False)
+    pressed = self._lkas_button_msg(True)
+    released = self._lkas_button_msg(False)
+
+    self._rx(released)
+    self.assertEqual(0, self.safety.get_mads_button_press())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    for _ in range(4):
+      orig, fwd = self._fwd_copy(0, pressed)
+      self._assert_only_tja_cleared(orig, fwd)
+      self._rx(pressed)
+      self.assertEqual(1, self.safety.get_mads_button_press())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    orig, fwd = self._fwd_copy(0, released)
+    self.assertEqual(orig, fwd)
+    self._rx(released)
+    self.assertEqual(0, self.safety.get_mads_button_press())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
 
 
 class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafetyTest):

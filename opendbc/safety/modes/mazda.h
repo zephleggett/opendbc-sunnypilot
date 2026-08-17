@@ -8,6 +8,8 @@
 #define MAZDA_CRZ_INFO      0x21bU
 #define MAZDA_CRZ_CTRL      0x21cU
 #define MAZDA_CRZ_BTNS      0x09dU
+// TJA_BUTTON: DBC start bit 11, 1-bit Motorola == Intel bit 11 (byte 1 bit 3).
+#define MAZDA_TJA_BUTTON_BIT 11U
 #define MAZDA_RADAR_STATIC  0x499U
 #define MAZDA_RADAR_TRACK_1 0x361U
 #define MAZDA_RADAR_TRACK_2 0x362U
@@ -106,7 +108,7 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
 
     // TJA_BUTTON is DBC start bit 11 (1-bit Motorola == Intel bit 11).
     if (msg->addr == MAZDA_CRZ_BTNS) {
-      mads_button_press = GET_BIT(msg, 11U) ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
+      mads_button_press = GET_BIT(msg, MAZDA_TJA_BUTTON_BIT) ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
 
       if (mazda_longitudinal) {
         // ensure the driver's cancel press always exits longitudinal controls
@@ -238,6 +240,14 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   return tx;
 }
 
+// Mutate only the bus0->bus2 forward copy of CRZ_BTNS. Panda RX and the OEM
+// body/MRCC keep the original bus0 frame, including physical TJA.
+static void mazda_fwd_modify(int bus_num, CANPacket_t *msg) {
+  if ((bus_num == MAZDA_MAIN) && (msg->addr == MAZDA_CRZ_BTNS) && (GET_LEN(msg) >= 2U)) {
+    msg->data[MAZDA_TJA_BUTTON_BIT / 8U] &= (uint8_t)~(1U << (MAZDA_TJA_BUTTON_BIT % 8U));
+  }
+}
+
 static safety_config mazda_init(uint16_t param) {
   static const CanMsg MAZDA_TX_MSGS[] = {
     {MAZDA_LKAS, 0, 8, .check_relay = true},
@@ -297,4 +307,5 @@ const safety_hooks mazda_hooks = {
   .init = mazda_init,
   .rx = mazda_rx_hook,
   .tx = mazda_tx_hook,
+  .fwd_modify = mazda_fwd_modify,
 };
