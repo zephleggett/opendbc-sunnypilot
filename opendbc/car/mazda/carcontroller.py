@@ -98,8 +98,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     # HUD: forward FSC CAM_LANEINFO at the stock ~2 Hz cadence (frame%50 @ 100 Hz).
     # Route 3F: do not accelerate 0x440 while MADS is active.
-    # MADS ON: FSC intact. MADS OFF (feature available): suppress steering-assist
-    # TJA icon only when an OEM-valid OFF representation exists (LL<=1).
+    # Proven LL1 OFF/WHITE family: MADS master selects OFF vs WHITE. All else FSC intact.
     if self.frame % 50 == 0:
       ldw = CC.hudControl.visualAlert == VisualAlert.ldw
       steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired

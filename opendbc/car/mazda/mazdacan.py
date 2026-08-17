@@ -7,7 +7,7 @@ from opendbc.car.mazda.values import Buttons, MazdaFlags
 # MADS-forced CAM_LANEINFO TJA=4 + FSC LANE_LINES=1 at ~100 Hz never occurs in OEM
 # Route 3C and coincided with missing icon/lanes and a cluster FSC malfunction.
 # Keep an internal CAM_LKAS settling hold; leave 0x440 ownership with FSC at ~2 Hz.
-# MADS-OFF only: suppress steering-assist TJA icon via OEM-observed OFF (LL<=1).
+# Proven LL1 OFF/WHITE family only: MADS selects OFF vs WHITE. All other 0x440 intact.
 STEER_ACTIVATION_HOLD_NS = 50_000_000
 TJA3_ACTIVATION_HOLD_NS = STEER_ACTIVATION_HOLD_NS  # legacy alias for tests
 FSC_LNV1_LKAS_REQUEST_MAX = 200
@@ -26,7 +26,7 @@ class LkasTx:
   state: str
   apply_torque: int
   cam_lkas_lnv: int
-  # 0x440 HUD fields are always the live FSC CAM_LANEINFO values (never MADS-forced).
+  # 0x440 HUD: proven LL1 OFF/WHITE family follows MADS; all other FSC payloads intact.
   tja: int
   lane_lines: int
   line_visible: int
@@ -223,38 +223,66 @@ def create_steering_control(packer, CP, frame, apply_torque, lkas, tx_lnv: int |
   return packer.make_can_msg("CAM_LKAS", 0, values)
 
 
+# Route 3C/41/42 OEM-observed LL1 OFF/WHITE pair. Differ only by TJA 0↔2.
+OEM_LL1_HUD_OFF = bytes.fromhex("4201000000001040")
+OEM_LL1_HUD_WHITE = bytes.fromhex("4201000020001040")
+OEM_LL1_HUD_FAMILY = (OEM_LL1_HUD_OFF, OEM_LL1_HUD_WHITE)
+
+
+def _in_oem_ll1_off_white_family(cam_msg: dict) -> bool:
+  if int(cam_msg.get("TJA", -1)) not in (0, 2):
+    return False
+  required = (
+    ("TJA_TRANSITION", 0),
+    ("LANE_LINES", 1),
+    ("LINE_VISIBLE", 0),
+    ("LINE_NOT_VISIBLE", 1),
+    ("BIT1", 1),
+    ("BIT2", 0),
+    ("BIT3", 1),
+    ("NO_ERR_BIT", 0),
+    ("S1", 1),
+    ("S1_HBEAM", 0),
+  )
+  for name, want in required:
+    if int(cam_msg.get(name, -1)) != want:
+      return False
+  for name in ("ERR_BIT", "HANDS_ON_STEER_WARN", "HANDS_ON_STEER_WARN_2",
+               "HANDS_WARN_3_BITS", "LDW_WARN_LL", "LDW_WARN_RL"):
+    if int(cam_msg.get(name, 0)) != 0:
+      return False
+  return True
+
+
 def suppress_steering_icon_hud(cam_msg: dict, mads_enabled: bool) -> dict:
-  """One-way MADS-OFF steering-icon suppression using an OEM-observed OFF form.
+  """Family-gated binary MADS HUD for the proven LL1 OFF/WHITE pair only.
 
-  Route 3C/41: for LANE_LINES<=1, OFF vs WHITE differs only in TJA (and TR must be
-  0 in OEM OFF). Setting TJA=0 + TJA_TRANSITION=0 with all other FSC fields intact
-  yields an exact OEM OFF payload (e.g. 4201000020001040 → 4201000000001040).
-
-  Do not invent hybrids: LANE_LINES>=2 WHITE/GREEN with TJA forced to 0 was never
-  observed as OEM OFF on Route 3C, so those frames stay FSC-intact.
+  Incoming FSC in {4201000000001040, 4201000020001040}:
+    MADS OFF → exact OEM OFF; MADS ON → exact OEM WHITE.
+  Every other payload is returned intact (no LL<=1 generic rewrite, no GREEN).
   """
   out = dict(cam_msg)
-  if mads_enabled:
+  if not _in_oem_ll1_off_white_family(out):
     return out
-  tja = int(out.get("TJA", 0))
-  if tja == 0:
-    return out
-  if int(out.get("LANE_LINES", 1)) > 1:
-    return out
-  out["TJA"] = 0
+  out["TJA"] = 2 if mads_enabled else 0
   out["TJA_TRANSITION"] = 0
   return out
+
+
+def _family_gated_mads_hud_dat(dat: bytes, mads_enabled: bool) -> bytes:
+  # Wire-level gate: only swap when the packed 8-byte frame is exactly the pair.
+  if dat not in OEM_LL1_HUD_FAMILY:
+    return dat
+  return OEM_LL1_HUD_WHITE if mads_enabled else OEM_LL1_HUD_OFF
 
 
 def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
                          apply_torque: int = 0, cam_lkas: dict | None = None,
                          tx: LkasTx | None = None, mads_enabled: bool = True):
-  # MADS ON: 0x440 is an FSC copy (Route 3F). MADS OFF: optionally suppress only the
-  # steering-assist TJA icon via an OEM-valid OFF representation; never synthesize
-  # WHITE/GREEN or alter cruise/MRCC state.
+  # Pack live FSC CAM_LANEINFO first (Route 3F: never invent GREEN / TJA=3/4).
+  # If that packed frame is the proven LL1 OFF/WHITE pair, select by MADS master.
   # `tx` / `ldw` / apply_torque / cam_lkas kept for API compatibility.
   del apply_torque, cam_lkas, tx, ldw
-  cam_msg = suppress_steering_icon_hud(cam_msg, mads_enabled)
   values = {s: cam_msg[s] for s in [
     "LINE_VISIBLE",
     "LINE_NOT_VISIBLE",
@@ -279,7 +307,8 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
     "LDW_WARN_LL": 0,
     "LDW_WARN_RL": 0,
   })
-  return packer.make_can_msg("CAM_LANEINFO", 0, values)
+  addr, dat, bus = packer.make_can_msg("CAM_LANEINFO", 0, values)
+  return addr, _family_gated_mads_hud_dat(bytes(dat), mads_enabled), bus
 
 
 def create_button_cmd(packer, CP, counter, button):
