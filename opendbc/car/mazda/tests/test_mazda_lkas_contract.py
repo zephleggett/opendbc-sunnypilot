@@ -539,5 +539,31 @@ class TestFamilyGatedBinaryMadsHud:
       raw = self._raw(lane, mads_enabled=mads)
       assert raw == (self.OEM_WHITE if mads else self.OEM_OFF)
 
+  def test_mads_unavailable_is_pure_fsc(self):
+    packer = CANPacker("mazda_2017")
+    cases = (
+      (self.FAMILY_OFF, self.OEM_OFF),
+      (self.FAMILY_WHITE, self.OEM_WHITE),
+      (_lane(tja=4, ll=2, lnv=1, vis=0), self.OEM_LL2_TJA4),
+    )
+    for lane, expect in cases:
+      for enabled in (False, True):
+        dat = bytes(mazdacan.create_alert_command(
+          packer, lane, False, False, mads_enabled=enabled, mads_available=False)[1])
+        assert dat.hex() == expect
+
+  def test_err_bit_is_not_canonicalized_into_family(self):
+    packer = CANPacker("mazda_2017")
+    for base, mads in ((self.FAMILY_OFF, False), (self.FAMILY_WHITE, True)):
+      faulted = dict(base, ERR_BIT=1)
+      assert not mazdacan._in_oem_ll1_off_white_family(faulted)
+      dat = bytes(mazdacan.create_alert_command(
+        packer, faulted, False, False, mads_enabled=mads)[1])
+      assert dat.hex() not in (self.OEM_OFF, self.OEM_WHITE)
+      v = _decode_440(dat)
+      assert v["ERR_BIT"] == 1
+      assert v["TJA"] == base["TJA"]
+      assert v["LANE_LINES"] == 1
+
 
 assert TJA3_ACTIVATION_HOLD_NS == STEER_ACTIVATION_HOLD_NS

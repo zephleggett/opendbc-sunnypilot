@@ -254,6 +254,27 @@ def _in_oem_ll1_off_white_family(cam_msg: dict) -> bool:
   return True
 
 
+CAM_LANEINFO_SIGNALS = (
+  "LINE_VISIBLE",
+  "LINE_NOT_VISIBLE",
+  "LANE_LINES",
+  "BIT1",
+  "BIT2",
+  "BIT3",
+  "NO_ERR_BIT",
+  "S1",
+  "S1_HBEAM",
+  "TJA",
+  "TJA_TRANSITION",
+  "ERR_BIT",
+  "HANDS_WARN_3_BITS",
+  "HANDS_ON_STEER_WARN",
+  "HANDS_ON_STEER_WARN_2",
+  "LDW_WARN_LL",
+  "LDW_WARN_RL",
+)
+
+
 def suppress_steering_icon_hud(cam_msg: dict, mads_enabled: bool) -> dict:
   """Family-gated binary MADS HUD for the proven LL1 OFF/WHITE pair only.
 
@@ -278,37 +299,19 @@ def _family_gated_mads_hud_dat(dat: bytes, mads_enabled: bool) -> bytes:
 
 def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
                          apply_torque: int = 0, cam_lkas: dict | None = None,
-                         tx: LkasTx | None = None, mads_enabled: bool = True):
-  # Pack live FSC CAM_LANEINFO first (Route 3F: never invent GREEN / TJA=3/4).
-  # If that packed frame is the proven LL1 OFF/WHITE pair, select by MADS master.
-  # `tx` / `ldw` / apply_torque / cam_lkas kept for API compatibility.
-  del apply_torque, cam_lkas, tx, ldw
-  values = {s: cam_msg[s] for s in [
-    "LINE_VISIBLE",
-    "LINE_NOT_VISIBLE",
-    "LANE_LINES",
-    "BIT1",
-    "BIT2",
-    "BIT3",
-    "NO_ERR_BIT",
-    "S1",
-    "S1_HBEAM",
-  ]}
-  values.update({
-    "TJA": int(cam_msg.get("TJA", 0)),
-    "TJA_TRANSITION": int(cam_msg.get("TJA_TRANSITION", 0)),
-    # TODO: what's the difference between all these? do we need to send all?
-    "HANDS_WARN_3_BITS": 0b111 if steer_required else 0,
-    "HANDS_ON_STEER_WARN": steer_required,
-    "HANDS_ON_STEER_WARN_2": steer_required,
-
-    # TODO: right lane works, left doesn't
-    # TODO: need to do something about L/R
-    "LDW_WARN_LL": 0,
-    "LDW_WARN_RL": 0,
-  })
+                         tx: LkasTx | None = None, mads_enabled: bool = True,
+                         mads_available: bool = True):
+  # Pack the live FSC CAM_LANEINFO, including fault/status bits. Family remap is
+  # allowed only when MADS is available AND the live message is the proven pair.
+  # `tx` / `ldw` / `steer_required` / apply_torque / cam_lkas kept for API compatibility.
+  del apply_torque, cam_lkas, tx, ldw, steer_required
+  values = {s: int(cam_msg.get(s, 0)) for s in CAM_LANEINFO_SIGNALS}
   addr, dat, bus = packer.make_can_msg("CAM_LANEINFO", 0, values)
-  return addr, _family_gated_mads_hud_dat(bytes(dat), mads_enabled), bus
+  if mads_available and _in_oem_ll1_off_white_family(cam_msg):
+    dat = OEM_LL1_HUD_WHITE if mads_enabled else OEM_LL1_HUD_OFF
+  else:
+    dat = bytes(dat)
+  return addr, dat, bus
 
 
 def create_button_cmd(packer, CP, counter, button, CS=None):
