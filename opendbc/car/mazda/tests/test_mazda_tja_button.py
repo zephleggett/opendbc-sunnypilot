@@ -366,4 +366,3 @@ class TestCreateButtonCmdPreservesWheelBits:
     assert decoded["RES"] == 1
     assert decoded["TJA_BUTTON"] == 0
     assert decoded["CAN_OFF"] == 0
-
